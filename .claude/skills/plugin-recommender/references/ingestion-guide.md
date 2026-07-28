@@ -94,10 +94,10 @@ Plugin: pinecone. Category: development. Author: Pinecone. Description: Pinecone
 
 ## 批量 Upsert 策略
 
-使用 MCP `upsert-records` 工具：
-- `name`: `claude-plugins-recommender`
+使用本地同步脚本通过 Pinecone Python SDK upsert 记录：
+- `index`: `claude-plugins-recommender`
 - `namespace`: 目标市场命名空间
-- `records`: 记录数组（每批 50 条）
+- `records`: 记录数组（单批建议不超过 96 条）
 
 274 条记录共需约 6 次 upsert 调用。
 

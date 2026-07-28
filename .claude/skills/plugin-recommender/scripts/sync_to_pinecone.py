@@ -16,280 +16,17 @@
 """
 
 import argparse
-import json
 import os
 import sys
-import time
-from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import Optional
 
-try:
-    import requests
-except ImportError:
-    print("错误: 需要 requests 库。运行: pip install requests")
-    sys.exit(1)
-
-
-# ── 配置 ──────────────────────────────────────────────────────────────────────
-
-MARKETPLACES_DIR = Path.home() / ".claude" / "plugins" / "marketplaces"
-DEFAULT_INDEX_NAME = "claude-plugins-recommender"
-DEFAULT_BATCH_SIZE = 100
-PINECONE_API_VERSION = "2025-04"
-
-# 市场名到命名空间的映射（市场名即命名空间名）
-MARKET_NAMESPACES = {
-    "claude-plugins-official": "claude-plugins-official",
-    "claude-community": "claude-community",
-    "ecc": "ecc",
-    "karpathy-skills": "karpathy-skills",
-    "mattpocock": "mattpocock",
-}
-
-# 占位符描述模式（过滤用）
-PLACEHOLDER_PATTERNS = [
-    "todo", "coming soon", "placeholder", "example", "template",
-    "no description", "[skill-name]", "this skill should be used when",
-]
-
-
-# ── 数据读取 ──────────────────────────────────────────────────────────────────
-
-def find_marketplace_files() -> List[Tuple[str, Path]]:
-    """查找所有 marketplace.json 文件，返回 (市场名, 文件路径) 列表"""
-    results = []
-    if not MARKETPLACES_DIR.exists():
-        return results
-
-    for market_dir in MARKETPLACES_DIR.iterdir():
-        if not market_dir.is_dir():
-            continue
-        marketplace_json = market_dir / ".claude-plugin" / "marketplace.json"
-        if marketplace_json.exists():
-            results.append((market_dir.name, marketplace_json))
-
-    return results
-
-
-def parse_marketplace(market_name: str, filepath: Path) -> List[Dict]:
-    """解析单个 marketplace.json，返回插件记录列表"""
-    with open(filepath, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    records = []
-    for plugin in data.get("plugins", []):
-        name = plugin.get("name", "")
-        description = plugin.get("description", "")
-
-        # 跳过无效插件
-        if not description or not description.strip():
-            continue
-        if any(p in description.lower() for p in PLACEHOLDER_PATTERNS):
-            continue
-
-        author = ""
-        if plugin.get("author"):
-            if isinstance(plugin["author"], dict):
-                author = plugin["author"].get("name", "")
-            elif isinstance(plugin["author"], str):
-                author = plugin["author"]
-
-        category = plugin.get("category", "uncategorized") or "uncategorized"
-        homepage = plugin.get("homepage", "") or ""
-
-        # 构造 _id：marketplace::plugin-name（插件名中的 :: 替换为 --）
-        safe_name = name.replace("::", "--")
-        plugin_id = f"{market_name}::{safe_name}"
-
-        # 构造嵌入文本
-        text = f"Plugin: {name}. Category: {category}. Author: {author}. Description: {description}"
-
-        records.append({
-            "_id": plugin_id,
-            "text": text,
-            "name": name,
-            "category": category,
-            "marketplace": market_name,
-            "author": author,
-            "homepage": homepage,
-        })
-
-    return records
-
-
-def read_all_plugins(marketplace_filter: Optional[str] = None) -> Dict[str, List[Dict]]:
-    """读取所有市场的插件数据，返回 {市场名: [记录]}"""
-    market_files = find_marketplace_files()
-    if not market_files:
-        print(f"错误: 未找到 marketplace.json 文件（检查 {MARKETPLACES_DIR}）")
-        sys.exit(1)
-
-    all_records = {}
-    for market_name, filepath in market_files:
-        if marketplace_filter and market_name != marketplace_filter:
-            continue
-        try:
-            records = parse_marketplace(market_name, filepath)
-            all_records[market_name] = records
-            print(f"  {market_name}: {len(records)} 个有效插件")
-        except Exception as e:
-            print(f"  {market_name}: 解析失败 - {e}")
-
-    return all_records
-
-
-# ── Pinecone API ──────────────────────────────────────────────────────────────
-
-class PineconeClient:
-    """Pinecone REST API 客户端"""
-
-    def __init__(self, api_key: str, index_name: str):
-        self.api_key = api_key
-        self.index_name = index_name
-        self.host = None
-        self._control_url = "https://api.pinecone.io"
-
-    def _headers(self, content_type: str = "application/json") -> Dict:
-        return {
-            "Api-Key": self.api_key,
-            "Content-Type": content_type,
-            "X-Pinecone-API-Version": PINECONE_API_VERSION,
-        }
-
-    def _resolve_host(self) -> str:
-        """获取索引主机名"""
-        if self.host:
-            return self.host
-
-        # 方法1: 从 describe_index 获取
-        try:
-            resp = requests.get(
-                f"{self._control_url}/indexes/{self.index_name}",
-                headers=self._headers(),
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                info = resp.json()
-                self.host = info.get("status", {}).get("host", "")
-                if self.host:
-                    return self.host
-        except Exception:
-            pass
-
-        # 方法2: 环境变量
-        env_host = os.environ.get("PINECONE_HOST")
-        if env_host:
-            self.host = env_host
-            return self.host
-
-        print(f"错误: 无法获取索引 '{self.index_name}' 的主机名")
-        print("请设置 PINECONE_HOST 环境变量或确保索引已创建")
-        sys.exit(1)
-
-    def index_exists(self) -> bool:
-        """检查索引是否存在"""
-        try:
-            resp = requests.get(
-                f"{self._control_url}/indexes/{self.index_name}",
-                headers=self._headers(),
-                timeout=10,
-            )
-            return resp.status_code == 200
-        except Exception:
-            return False
-
-    def create_index(self) -> bool:
-        """创建索引"""
-        print(f"创建索引 '{self.index_name}'...")
-        try:
-            resp = requests.post(
-                f"{self._control_url}/indexes",
-                headers=self._headers(),
-                json={
-                    "name": self.index_name,
-                    "cloud": "aws",
-                    "region": "us-east-1",
-                    "embed": {
-                        "model": "llama-text-embed-v2",
-                        "fieldMap": {"text": "text"},
-                    },
-                },
-                timeout=30,
-            )
-            if resp.status_code in (200, 201):
-                print("索引创建请求已发送，等待就绪...")
-                return self._wait_for_ready()
-            else:
-                print(f"创建索引失败: {resp.status_code} {resp.text}")
-                return False
-        except Exception as e:
-            print(f"创建索引异常: {e}")
-            return False
-
-    def _wait_for_ready(self, timeout: int = 120) -> bool:
-        """等待索引就绪"""
-        start = time.time()
-        while time.time() - start < timeout:
-            try:
-                resp = requests.get(
-                    f"{self._control_url}/indexes/{self.index_name}",
-                    headers=self._headers(),
-                    timeout=10,
-                )
-                if resp.status_code == 200:
-                    status = resp.json().get("status", {}).get("state", "")
-                    if status == "Ready":
-                        print("索引已就绪")
-                        return True
-                    print(f"  索引状态: {status}...")
-            except Exception:
-                pass
-            time.sleep(3)
-
-        print(f"等待索引就绪超时（{timeout}s）")
-        return False
-
-    def upsert(self, namespace: str, records: List[Dict]) -> bool:
-        """批量 upsert 记录"""
-        host = self._resolve_host()
-        url = f"https://{host}/vectors/upsert"
-
-        try:
-            resp = requests.post(
-                url,
-                headers=self._headers(),
-                json={"vectors": records, "namespace": namespace},
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                return True
-            else:
-                print(f"    upsert 失败: {resp.status_code} {resp.text[:200]}")
-                return False
-        except Exception as e:
-            print(f"    upsert 异常: {e}")
-            return False
-
-    def describe_index_stats(self) -> Optional[Dict]:
-        """获取索引统计信息"""
-        host = self._resolve_host()
-        url = f"https://{host}/vectors/describe_index_stats"
-
-        try:
-            resp = requests.post(
-                url,
-                headers=self._headers(),
-                json={},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                return resp.json()
-            else:
-                print(f"获取索引统计失败: {resp.status_code} {resp.text[:200]}")
-                return None
-        except Exception as e:
-            print(f"获取索引统计异常: {e}")
-            return None
+from pinecone_client import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_INDEX_NAME,
+    MARKET_NAMESPACES,
+    PineconeClient,
+    read_all_plugins,
+)
 
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────
@@ -406,6 +143,12 @@ def main():
         sys.exit(1)
 
     index_name = args.index or os.environ.get("PINECONE_INDEX", DEFAULT_INDEX_NAME)
+
+    # SDK 的 upsert_records 单次请求对 batch size 有上限（通常为 96）。
+    # 如果用户传得太大，会直接报 400 INVALID_ARGUMENT。
+    if args.batch_size > 96:
+        print(f"警告: --batch-size 过大（{args.batch_size}），已自动降到 96 以兼容 Pinecone SDK")
+        args.batch_size = 96
 
     # 解析市场过滤器
     marketplace_filter = None

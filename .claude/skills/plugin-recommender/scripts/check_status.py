@@ -18,111 +18,20 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
-try:
-    import requests
-except ImportError:
-    print("错误: 需要 requests 库。运行: pip install requests")
-    sys.exit(1)
-
-
-# ── 配置 ──────────────────────────────────────────────────────────────────────
-
-MARKETPLACES_DIR = Path.home() / ".claude" / "plugins" / "marketplaces"
-DEFAULT_INDEX_NAME = "claude-plugins-recommender"
-PINECONE_API_VERSION = "2025-04"
-
-PLACEHOLDER_PATTERNS = [
-    "todo", "coming soon", "placeholder", "example", "template",
-    "no description", "[skill-name]", "this skill should be used when",
-]
-
-
-# ── 本地数据统计 ──────────────────────────────────────────────────────────────
-
-def count_local_plugins() -> Dict[str, int]:
-    """统计各市场的有效插件数量"""
-    counts = {}
-    if not MARKETPLACES_DIR.exists():
-        return counts
-
-    for market_dir in MARKETPLACES_DIR.iterdir():
-        if not market_dir.is_dir():
-            continue
-        marketplace_json = market_dir / ".claude-plugin" / "marketplace.json"
-        if not marketplace_json.exists():
-            continue
-
-        try:
-            with open(marketplace_json, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            valid = 0
-            for plugin in data.get("plugins", []):
-                desc = plugin.get("description", "")
-                if not desc or not desc.strip():
-                    continue
-                if any(p in desc.lower() for p in PLACEHOLDER_PATTERNS):
-                    continue
-                valid += 1
-
-            counts[market_dir.name] = valid
-        except Exception as e:
-            print(f"  {market_dir.name}: 读取失败 - {e}")
-
-    return counts
+from pinecone_client import DEFAULT_INDEX_NAME, PineconeClient, count_local_plugins
 
 
 # ── Pinecone 索引统计 ─────────────────────────────────────────────────────────
 
 def get_index_stats(api_key: str, index_name: str) -> Optional[Dict]:
     """获取 Pinecone 索引统计信息"""
-    control_url = "https://api.pinecone.io"
-    headers = {
-        "Api-Key": api_key,
-        "Content-Type": "application/json",
-        "X-Pinecone-API-Version": PINECONE_API_VERSION,
-    }
-
-    # 获取主机名
-    host = os.environ.get("PINECONE_HOST")
-    if not host:
-        try:
-            resp = requests.get(
-                f"{control_url}/indexes/{index_name}",
-                headers=headers,
-                timeout=10,
-            )
-            if resp.status_code != 200:
-                print(f"  获取索引信息失败: {resp.status_code}")
-                return None
-            host = resp.json().get("status", {}).get("host", "")
-        except Exception as e:
-            print(f"  连接 Pinecone 失败: {e}")
-            return None
-
-    if not host:
-        print("  无法获取索引主机名")
+    client = PineconeClient(api_key, index_name)
+    if not client.index_exists():
+        print("  索引不存在")
         return None
-
-    # 获取统计
-    try:
-        resp = requests.post(
-            f"https://{host}/vectors/describe_index_stats",
-            headers=headers,
-            json={},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            return resp.json()
-        else:
-            print(f"  获取索引统计失败: {resp.status_code} {resp.text[:200]}")
-            return None
-    except Exception as e:
-        print(f"  获取索引统计异常: {e}")
-        return None
+    return client.describe_index_stats()
 
 
 # ── 主流程 ────────────────────────────────────────────────────────────────────

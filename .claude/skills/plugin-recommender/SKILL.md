@@ -8,7 +8,7 @@ argument-hint: query [你的查询]
 
 # Plugin Recommender
 
-根据用户的自然语言查询，从已安装的 Claude Code 插件市场中推荐最合适的插件。使用 Pinecone 语义搜索进行粗筛，然后由 AI 进行精选推荐。
+根据用户的自然语言查询，从已安装的 Claude Code 插件市场中推荐最合适的插件。使用本地 Python 脚本通过 Pinecone Python SDK 做语义搜索粗筛，然后由 AI 进行精选推荐。
 
 ## 前置检查
 
@@ -16,28 +16,29 @@ argument-hint: query [你的查询]
 
 ### 1. 检查 Pinecone 索引是否存在
 
-调用 `list-indexes` MCP 工具，检查返回的索引列表中是否包含名为 `claude-plugins-recommender` 的索引。
+调用检查脚本：
+```bash
+python3 .claude/skills/plugin-recommender/scripts/search_plugins.py status
+```
 
-- **如果索引不存在** → 转到「导入数据」流程
-- **如果索引存在** → 继续下一步
+读取 JSON 输出，检查 `index_exists` 字段：
+- `index_exists: true` → 索引存在，继续下一步
+- `index_exists: false` → 索引不存在，转到「导入数据」流程
 
 ### 2. 检查索引是否有数据
 
-调用 `describe-index-stats` MCP 工具，参数 `name: "claude-plugins-recommender"`。
+从上一步的输出中查看 `namespaces` 字段：
+- `claude-plugins-official` 命名空间的 `vector_count` 应 ≥ 270
+- `karpathy-skills` 命名空间的 `vector_count` 应 ≥ 1
 
-检查返回的 `namespaces` 中：
-- `claude-plugins-official` 命名空间的记录数应 ≥ 270
-- `karpathy-skills` 命名空间的记录数应 ≥ 1
-
-- **如果记录数为 0 或不足** → 转到「导入数据」流程
-- **如果记录数正常** → 继续下一步
+如果 `ready: false` 或记录数不足 → 转到「导入数据」流程
 
 ### 3. 检查数据新鲜度
 
-读取本地市场文件，计算实际插件数量：
-- 读取 `~/.claude/plugins/marketplaces/claude-plugins-official/.claude-plugin/marketplace.json`
-- 读取 `~/.claude/plugins/marketplaces/karpathy-skills/.claude-plugin/marketplace.json`
-- 统计每个市场中 `description` 非空的插件数量（与导入规则一致）
+调用状态检查脚本：
+```bash
+python3 .claude/skills/plugin-recommender/scripts/check_status.py --json
+```
 
 将统计结果与索引中的记录数对比：
 - 如果索引记录数与本地插件数差距 ≤ 10 → 数据基本同步，正常查询
@@ -67,56 +68,26 @@ argument-hint: query [你的查询]
 
 **默认搜索（跨所有市场）：**
 
-调用 `cascading-search` MCP 工具：
-```json
-{
-  "indexes": [
-    { "name": "claude-plugins-recommender", "namespace": "claude-plugins-official" },
-    { "name": "claude-plugins-recommender", "namespace": "karpathy-skills" }
-  ],
-  "query": {
-    "topK": 50,
-    "inputs": { "text": "<构造的搜索查询>" }
-  },
-  "rerank": {
-    "model": "bge-reranker-v2-m3",
-    "rankFields": ["text"],
-    "topN": 15
-  }
-}
+调用本地搜索脚本：
+```bash
+python3 .claude/skills/plugin-recommender/scripts/search_plugins.py search "<构造的搜索查询>"
 ```
 
 **指定市场搜索：**
 
-如果用户明确指定某个市场，调用 `search-records`：
-```json
-{
-  "name": "claude-plugins-recommender",
-  "namespace": "<市场名称>",
-  "query": {
-    "topK": 50,
-    "inputs": { "text": "<构造的搜索查询>" }
-  },
-  "rerank": {
-    "model": "bge-reranker-v2-m3",
-    "rankFields": ["text"],
-    "topN": 15
-  }
-}
+如果用户明确指定某个市场，传入 `--namespace`：
+```bash
+python3 .claude/skills/plugin-recommender/scripts/search_plugins.py search "<构造的搜索查询>" --namespace <市场名称>
 ```
 
 **指定分类过滤：**
 
 如果用户指定了分类（如"安全类插件"），添加过滤条件：
-```json
-{
-  "query": {
-    "topK": 50,
-    "inputs": { "text": "<查询>" },
-    "filter": { "category": { "$eq": "security" } }
-  }
-}
+```bash
+python3 .claude/skills/plugin-recommender/scripts/search_plugins.py search "<查询>" --filter category=security
 ```
+
+脚本会默认搜索所有已知命名空间，按相关度合并排序，并返回最多 15 个候选结果。
 
 ### 步骤 3：分析并推荐
 
