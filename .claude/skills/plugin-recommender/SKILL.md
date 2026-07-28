@@ -151,99 +151,40 @@ argument-hint: query [你的查询]
 - 检查是否有特定的分类需求
 - 手动浏览插件市场
 
-## 导入数据流程
+## 导入/刷新数据流程
 
-当索引不存在或数据不足时执行。
+当索引不存在、数据不足、或用户说"刷新插件"、"同步插件"时，执行脚本完成数据同步。
 
-### 步骤 1：创建索引
+### 步骤 1：检查当前状态
 
-调用 `create-index-for-model` MCP 工具：
-```json
-{
-  "name": "claude-plugins-recommender",
-  "cloud": "aws",
-  "region": "us-east-1",
-  "embed": {
-    "model": "llama-text-embed-v2",
-    "fieldMap": { "text": "text" }
-  }
-}
+```bash
+python3 .claude/skills/plugin-recommender/scripts/check_status.py
 ```
 
-等待索引创建完成（通常需要几秒）。调用 `describe-index-stats` 确认索引状态为 Ready。
+### 步骤 2：执行同步
 
-### 步骤 2：读取市场数据
-
-读取以下文件：
-- `~/.claude/plugins/marketplaces/claude-plugins-official/.claude-plugin/marketplace.json`
-- `~/.claude/plugins/marketplaces/karpathy-skills/.claude-plugin/marketplace.json`
-
-详细解析逻辑参见 `references/ingestion-guide.md`。
-
-### 步骤 3：构造记录
-
-对每个市场中的每个插件，构造 Pinecone 记录：
-
-```json
-{
-  "_id": "{marketplace}::{plugin_name}",
-  "text": "Plugin: {name}. Category: {category}. Author: {author}. Description: {description}",
-  "name": "{plugin_name}",
-  "category": "{category}",
-  "marketplace": "{marketplace}",
-  "author": "{author_name}",
-  "homepage": "{homepage}"
-}
+```bash
+PINECONE_API_KEY=<key> python3 .claude/skills/plugin-recommender/scripts/sync_to_pinecone.py
 ```
 
-缺失字段处理：
-- `author` 缺失 → 用空字符串 `""`
-- `category` 缺失 → 用 `"uncategorized"`
-- `homepage` 缺失 → 用空字符串 `""`
-- `description` 缺失 → 跳过该插件
+脚本自动完成：读取所有市场 marketplace.json → 构造 Pinecone 记录 → 批量 upsert → 验证结果。
 
-### 步骤 4：批量 Upsert
+常用选项：
+- `--dry-run`：预览模式，不实际上传
+- `--marketplaces official`：只同步指定市场
+- `--batch-size 50`：自定义批大小
 
-对每个市场，将记录按每批 50 条分组，调用 `upsert-records`：
+### 步骤 3：确认结果
 
-```json
-{
-  "name": "claude-plugins-recommender",
-  "namespace": "<marketplace-name>",
-  "records": [ ... 50 records ... ]
-}
-```
-
-处理顺序：
-1. `claude-plugins-official`（~273 条，约 6 批）
-2. `karpathy-skills`（1 条，1 批）
-
-### 步骤 5：验证
-
-调用 `describe-index-stats` 确认：
-- `claude-plugins-official` 命名空间记录数 ≥ 270
-- `karpathy-skills` 命名空间记录数 ≥ 1
-
-验证通过后，告知用户数据导入完成，可以开始查询。
-
-## 刷新数据流程
-
-当用户说"刷新插件"、"同步插件"、"更新插件索引"时执行。
-
-刷新流程与导入流程相同：
-1. 读取最新的 marketplace.json 文件
-2. 使用相同的 `_id` 格式，upsert 会自动更新已有记录
-3. 新插件会被插入，已移除的插件会保留在索引中（不影响搜索质量）
-
-刷新完成后，告知用户更新了多少条记录。
+同步完成后，脚本会自动输出各命名空间的验证结果。也可再次运行 `check_status.py` 确认。
 
 ## 错误处理
 
 | 错误场景 | 处理方式 |
 |----------|---------|
-| 索引不存在 | 执行导入数据流程 |
-| MCP 工具不可用 | 提示用户安装 Pinecone 插件并设置 `PINECONE_API_KEY` |
+| 索引不存在 | 脚本会自动创建索引 |
+| `PINECONE_API_KEY` 未设置 | 提示用户设置环境变量 |
 | 市场文件不存在 | 提示用户运行市场更新命令获取最新数据 |
 | 搜索无结果 | 建议使用更宽泛的查询词，或移除分类过滤 |
-| upsert 失败 | 记录错误信息，继续处理下一批 |
+| upsert 失败 | 脚本会记录错误并继续处理下一批 |
 | 索引创建失败 | 检查 Pinecone API 配额，提示用户 |
