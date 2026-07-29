@@ -335,6 +335,32 @@ class PineconeClient:
             print(f"获取索引统计异常: {e}")
             return None
 
+    def list_ids(self, namespace: str = "") -> List[str]:
+        """列出指定命名空间中所有记录的 ID"""
+        try:
+            ids = []
+            for page in self._get_index().list(limit=100, namespace=namespace):
+                vectors = getattr(page, "vectors", None) or []
+                for v in vectors:
+                    vid = getattr(v, "id", None) or (v.get("id") if isinstance(v, dict) else None)
+                    if vid:
+                        ids.append(vid)
+            return ids
+        except Exception as e:
+            print(f"  列出 ID 异常: {e}", file=sys.stderr)
+            return []
+
+    def delete_ids(self, namespace: str, ids: List[str]) -> bool:
+        """从命名空间中删除指定 ID 的记录"""
+        if not ids:
+            return True
+        try:
+            self._get_index().delete(ids=ids, namespace=namespace, timeout=30)
+            return True
+        except Exception as e:
+            print(f"    delete 异常: {e}")
+            return False
+
     def query(
         self,
         namespace: str,

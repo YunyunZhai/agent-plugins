@@ -72,8 +72,25 @@ def sync(
     else:
         print("  索引已存在")
 
-    # 3. 批量 upsert
-    print(f"\n[3/4] 上传数据（批大小: {batch_size}）...")
+    # 3. 清理过期记录（增量同步的核心：删除索引有但本地已无的记录）
+    print(f"\n[3/4] 清理过期记录...")
+    total_cleaned = 0
+    for market_name in all_records:
+        namespace = MARKET_NAMESPACES.get(market_name, market_name)
+        local_ids = {r["_id"] for r in all_records[market_name]}
+        existing_ids = set(client.list_ids(namespace))
+        stale_ids = existing_ids - local_ids
+        if stale_ids:
+            if client.delete_ids(namespace, list(stale_ids)):
+                total_cleaned += len(stale_ids)
+                print(f"  {market_name} ({namespace}): 删除 {len(stale_ids)} 条过期记录")
+            else:
+                print(f"  {market_name} ({namespace}): 删除失败")
+        else:
+            print(f"  {market_name} ({namespace}): 无过期记录")
+
+    # 4. 批量 upsert（只上传本地现有记录）
+    print(f"\n[4/4] 上传数据（批大小: {batch_size}）...")
     success_count = 0
     fail_count = 0
 
@@ -90,8 +107,8 @@ def sync(
                 fail_count += len(batch)
                 print(f"    批 {i + 1}/{len(batches)} ✗ 失败")
 
-    # 4. 验证
-    print(f"\n[4/4] 验证上传结果...")
+    # 5. 验证
+    print(f"\n[5/4] 验证上传结果...")
     stats = client.describe_index_stats()
     if stats:
         namespaces = stats.get("namespaces", {})
@@ -102,7 +119,7 @@ def sync(
             status = "✓" if actual >= expected else "⚠"
             print(f"  {status} {namespace}: 索引 {actual} / 预期 {expected}")
 
-    print(f"\n完成: 成功 {success_count} 条, 失败 {fail_count} 条")
+    print(f"\n完成: 成功 {success_count} 条, 失败 {fail_count} 条, 清理 {total_cleaned} 条过期记录")
     return fail_count == 0
 
 
