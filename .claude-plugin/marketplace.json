@@ -1,0 +1,26 @@
+{
+  "name": "agent-plugins",
+  "owner": {
+    "name": "YunyunZhai"
+  },
+  "metadata": {
+    "description": "Claude Code 插件工具集：插件推荐与市场发现",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "plugin-recommender",
+      "source": "./plugins/plugin-recommender",
+      "description": "从已安装的插件市场中根据自然语言查询推荐最合适的 Claude Code 插件。使用 Pinecone 向量搜索粗筛，再由 AI 精选推荐。",
+      "version": "1.0.0",
+      "author": {
+        "name": "YunyunZhai"
+      },
+      "category": "productivity",
+      "tags": ["plugins", "recommender", "pinecone", "discovery"],
+      "homepage": "https://github.com/YunyunZhai/agent-plugins",
+      "repository": "https://github.com/YunyunZhai/agent-plugins",
+      "license": "MIT"
+    }
+  ]
+}

@@ -51,7 +51,7 @@ argument-hint: query [你的查询]
 
 运行检查脚本获取索引状态：
 ```bash
-python3 .claude/skills/plugin-recommender/scripts/search_plugins.py status
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/search_plugins.py status
 ```
 
 解析 JSON 输出，向用户展示状态摘要：
@@ -91,7 +91,7 @@ python3 .claude/skills/plugin-recommender/scripts/search_plugins.py status
 
 调用状态检查脚本：
 ```bash
-python3 .claude/skills/plugin-recommender/scripts/check_status.py --json
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/check_status.py --json
 ```
 
 解析 JSON 输出，比较索引记录数与本地插件数：
@@ -136,13 +136,13 @@ python3 .claude/skills/plugin-recommender/scripts/check_status.py --json
 
 如需手动同步/增量更新，可以随时使用：
 ```bash
-python3 .claude/skills/plugin-recommender/scripts/sync_to_pinecone.py
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sync_to_pinecone.py
 ```
 同步是增量的——仅上传新增或更新的插件，自动清理已移除的插件，已有数据不受影响。
 
 如需仅同步特定市场：
 ```bash
-python3 .claude/skills/plugin-recommender/scripts/sync_to_pinecone.py --marketplaces official
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sync_to_pinecone.py --marketplaces official
 ```
 
 然后继续进入「查询推荐流程」。
@@ -164,21 +164,21 @@ python3 .claude/skills/plugin-recommender/scripts/sync_to_pinecone.py --marketpl
 
 调用本地搜索脚本：
 ```bash
-python3 .claude/skills/plugin-recommender/scripts/search_plugins.py search "<构造的搜索查询>"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/search_plugins.py search "<构造的搜索查询>"
 ```
 
 **指定市场搜索：**
 
 如果用户明确指定某个市场，传入 `--namespace`：
 ```bash
-python3 .claude/skills/plugin-recommender/scripts/search_plugins.py search "<构造的搜索查询>" --namespace <市场名称>
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/search_plugins.py search "<构造的搜索查询>" --namespace <市场名称>
 ```
 
 **指定分类过滤：**
 
 如果用户指定了分类（如"安全类插件"），添加过滤条件：
 ```bash
-python3 .claude/skills/plugin-recommender/scripts/search_plugins.py search "<查询>" --filter category=security
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/search_plugins.py search "<查询>" --filter category=security
 ```
 
 脚本会默认搜索所有已知命名空间，按相关度合并排序，并返回最多 15 个候选结果。
@@ -223,7 +223,7 @@ python3 .claude/skills/plugin-recommender/scripts/search_plugins.py search "<查
 ### 步骤 1：检查当前状态
 
 ```bash
-python3 .claude/skills/plugin-recommender/scripts/check_status.py
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/check_status.py
 ```
 
 ### 步骤 2：确认同步计划
@@ -250,14 +250,14 @@ python3 .claude/skills/plugin-recommender/scripts/check_status.py
 **选项 A — 执行同步**
 - API Key 已在环境中，直接执行同步：
   ```bash
-  python3 .claude/skills/plugin-recommender/scripts/sync_to_pinecone.py
+  python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sync_to_pinecone.py
   ```
 - 同步完成后继续「步骤 3」
 
 **选项 B — 先预览变更**
 - 使用 `--dry-run` 预览将要上传的数据：
   ```bash
-  python3 .claude/skills/plugin-recommender/scripts/sync_to_pinecone.py --dry-run
+  python3 ${CLAUDE_PLUGIN_ROOT}/scripts/sync_to_pinecone.py --dry-run
   ```
 - 预览后再次询问是否执行同步
 
