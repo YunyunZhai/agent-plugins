@@ -14,6 +14,23 @@ argument-hint: query [你的查询]
 
 每次使用前，执行以下检查：
 
+### 0. 检查 API Key 是否已配置
+
+在调用任何 Pinecone 相关脚本之前，先检查 `PINECONE_API_KEY` 是否已设置：
+
+如果未设置 → 通过 **AskUserQuestion** 弹窗交互，提供两个选项：
+
+**选项 A — 输入 API Key**
+- 用户输入 Pinecone API Key
+- 调用 Edit 工具将 `"PINECONE_API_KEY": "<用户输入的key>"` 写入 `~/.claude/settings.json` 的 `env` 字段中
+- 告知用户：配置已保存到 `~/.claude/settings.json`，后续新会话会自动加载
+
+**选项 B — 退出技能**
+- 告知用户：Plugin Recommender 需要配置 `PINECONE_API_KEY` 才能使用
+- 结束流程，不再执行后续任何步骤
+
+如果 API Key 已设置 → 继续后续步骤。
+
 ### 1. 检查 Pinecone 索引是否存在
 
 调用检查脚本：
@@ -154,7 +171,7 @@ PINECONE_API_KEY=<key> python3 .claude/skills/plugin-recommender/scripts/sync_to
 | 错误场景 | 处理方式 |
 |----------|---------|
 | 索引不存在 | 脚本会自动创建索引 |
-| `PINECONE_API_KEY` 未设置 | 提示用户设置环境变量 |
+| `PINECONE_API_KEY` 未设置 | 弹窗交互：用户输入 Key 后自动写入 `~/.claude/settings.json`，或取消退出 |
 | 市场文件不存在 | 提示用户运行市场更新命令获取最新数据 |
 | 搜索无结果 | 建议使用更宽泛的查询词，或移除分类过滤 |
 | upsert 失败 | 脚本会记录错误并继续处理下一批 |
