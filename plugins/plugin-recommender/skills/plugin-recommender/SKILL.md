@@ -1,7 +1,7 @@
 ---
 name: plugin-recommender
 description: |
-  从已安装的插件市场中根据用户查询推荐最合适的 Claude Code 插件。使用 Pinecone 向量搜索从所有市场中查找最相关的插件，然后由 AI 分析并推荐。当用户询问"有什么插件可以"、"推荐一个插件"、"帮我找插件"、"搜索插件"、"哪个插件适合"时触发。也用于"刷新插件"、"同步插件"重新导入市场数据。
+  当用户询问"有什么插件可以"、"推荐一个插件"、"帮我找插件"、"搜索插件"、"哪个插件适合"、"找安全扫描插件"、"代码审查插件推荐"等插件相关问题时触发。使用 Pinecone 向量搜索从已安装的插件市场中查找最相关的插件，然后由 AI 分析并推荐最合适的 3-5 个插件。也可用于"刷新插件"、"同步插件"重新导入市场数据到 Pinecone 索引。
 allowed-tools: Bash, Read
 argument-hint: query [你的查询]
 ---
@@ -276,11 +276,4 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/check_status.py
 
 ## 错误处理
 
-| 错误场景 | 处理方式 |
-|----------|---------|
-| 索引不存在 | 脚本会自动创建索引 |
-| `PINECONE_API_KEY` 未设置 | 弹窗交互：用户输入 Key 后自动写入 `~/.claude/settings.json`，或取消退出 |
-| 市场文件不存在 | 提示用户运行市场更新命令获取最新数据 |
-| 搜索无结果 | 建议使用更宽泛的查询词，或移除分类过滤 |
-| upsert 失败 | 脚本会记录错误并继续处理下一批 |
-| 索引创建失败 | 检查 Pinecone API 配额，提示用户 |
+详见 [references/error-handling.md](references/error-handling.md)
