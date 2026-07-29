@@ -18,7 +18,23 @@ argument-hint: query [你的查询]
 
 在调用任何 Pinecone 相关脚本之前，先检查 `PINECONE_API_KEY` 是否已设置：
 
-如果未设置 → 通过 **AskUserQuestion** 弹窗交互，提供两个选项：
+如果未设置 → 通过 **AskUserQuestion** 弹窗交互，优先向用户展示以下配置信息：
+
+```
+📋 需要配置 Pinecone API Key
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+用途:      Pinecone 向量搜索，检索匹配的插件
+索引名称:  claude-plugins-recommender
+目标命名空间:
+  claude-plugins-official  — Claude Code 官方插件
+  claude-community         — 社区插件
+  ecc                      — ECC 插件
+  karpathy-skills          — Karpathy 技能
+  mattpocock               — Matt Pocock 技能
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+提供两个选项：
 
 **选项 A — 输入 API Key**
 - 用户输入 Pinecone API Key
@@ -31,55 +47,116 @@ argument-hint: query [你的查询]
 
 如果 API Key 已设置 → 继续后续步骤。
 
-### 1. 检查 Pinecone 索引是否存在
+### 1. 检查 Pinecone 索引状态
 
-调用检查脚本：
+运行检查脚本获取索引状态：
 ```bash
 python3 .claude/skills/plugin-recommender/scripts/search_plugins.py status
 ```
 
-读取 JSON 输出，检查 `index_exists` 字段：
-- `index_exists: true` → 索引存在，继续下一步
-- `index_exists: false` → 索引不存在，转到「导入数据」流程
+解析 JSON 输出，向用户展示状态摘要：
 
-### 2. 检查索引是否有数据
+```
+📊 Pinecone 索引状态
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+索引名称: <index_name>
+索引状态: ✅ 已创建 / ❌ 不存在
+就绪状态: ✅ 数据充足 / ⚠ 数据不足
 
-从上一步的输出中查看 `namespaces` 字段：
-- `claude-plugins-official` 命名空间的 `vector_count` 应 ≥ 270
-- `karpathy-skills` 命名空间的 `vector_count` 应 ≥ 1
+命名空间:
+  claude-plugins-official: <N> 条记录
+  karpathy-skills:         <N> 条记录
+  ...
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
 
-如果 `ready: false` 或记录数不足 → 转到「导入数据」流程
+**情况 A — 索引正常且数据充足**
+- `index_exists: true` 且 `ready: true` → 索引就绪，继续下一步
 
-### 3. 检查数据新鲜度
+**情况 B — 索引异常（不存在 / 数据不足）**
+- `index_exists: false` 或 `ready: false` → 展示状态摘要后，通过 **AskUserQuestion** 让用户决策：
+
+**选项 A — 执行同步**
+- 告知用户将执行的操作：
+  - 索引不存在 → 创建索引 `claude-plugins-recommender`（model: `llama-text-embed-v2`，region: `aws/us-east-1`）
+  - 上传各命名空间的插件数据（展示各市场预期记录数）
+  - 同步完成后继续查询
+- 确认后转到「导入/刷新数据流程」
+
+**选项 B — 取消**
+- 告知用户：无法查询，需要索引就绪才能使用
+- 结束流程
+
+### 2. 检查数据新鲜度
 
 调用状态检查脚本：
 ```bash
 python3 .claude/skills/plugin-recommender/scripts/check_status.py --json
 ```
 
-将统计结果与索引中的记录数对比：
-- 如果索引记录数与本地插件数差距 ≤ 10 → 数据基本同步，正常查询
-- 如果索引记录数与本地插件数差距 > 10 → 告知用户：
+解析 JSON 输出，比较索引记录数与本地插件数：
+
+**情况 A — 数据基本同步（差值 ≤ 10）**
+- 说明数据基本同步，继续下一步
+
+**情况 B — 数据可能过期（差值 > 10）**
+- 向用户展示对比数据：
 
 ```
-⚠️ 插件市场数据可能已更新（索引有 {N} 条，本地有 {M} 条）。
-建议先运行「刷新插件」获取最新数据，或直接查询（使用当前索引数据）。
+⚠️ 插件市场数据可能已更新
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+索引记录数:  <N> 条
+本地插件数:  <M> 条
+差值:        <diff> 条
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-等待用户决定是否先刷新再查询。
+- 通过 **AskUserQuestion** 让用户决定：
+
+**选项 A — 先同步再查询**
+- 执行同步流程，完成后继续查询
+
+**选项 B — 直接使用当前数据查询**
+- 跳过同步，直接进入查询推荐流程
+
+### 3. 检查通过 — 状态摘要与操作指引
+
+当前置检查全部通过时，在进入查询前向用户展示一段简短的状态摘要：
+
+```
+✅ 插件推荐器准备就绪
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+索引:      claude-plugins-recommender ✓
+命名空间:  <N> 个（共 <M> 条记录）
+状态:      数据已同步
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+简要告知用户：
+
+如需手动同步/增量更新，可以随时使用：
+```bash
+python3 .claude/skills/plugin-recommender/scripts/sync_to_pinecone.py
+```
+同步是增量的——仅上传新增或更新的插件，自动清理已移除的插件，已有数据不受影响。
+
+如需仅同步特定市场：
+```bash
+python3 .claude/skills/plugin-recommender/scripts/sync_to_pinecone.py --marketplaces official
+```
+
+然后继续进入「查询推荐流程」。
 
 ## 查询推荐流程
 
 ### 步骤 1：构造搜索查询
 
-从用户的自然语言请求中提取核心意图，构造搜索查询文本。查询应包含：
-- 用户想要的功能或技术领域
-- 相关的关键词和概念
+从用户的自然语言请求中提取核心意图，构造搜索查询文本。使用用户原文（中文）作为查询词，嵌入模型支持多语言，无需翻译成英文。可适当补充相关的关键词增强召回。
 
 示例：
-- 用户："帮我找一个安全扫描插件" → 查询："security scanning vulnerability detection"
-- 用户："推荐代码质量相关插件" → 查询："code quality review linting static analysis"
-- 用户："有什么插件可以帮我管理数据库" → 查询："database management SQL operations"
+- 用户："帮我找一个安全扫描插件" → 查询："安全扫描 漏洞检测 安全审计"
+- 用户："推荐代码质量相关插件" → 查询："代码质量 代码审查 linting 静态分析"
+- 用户："有什么插件可以帮我管理数据库" → 查询："数据库管理 SQL 数据库操作"
 
 ### 步骤 2：调用 Pinecone 搜索
 
@@ -149,15 +226,46 @@ python3 .claude/skills/plugin-recommender/scripts/search_plugins.py search "<查
 python3 .claude/skills/plugin-recommender/scripts/check_status.py
 ```
 
-### 步骤 2：执行同步
+### 步骤 2：确认同步计划
 
-```bash
-PINECONE_API_KEY=<key> python3 .claude/skills/plugin-recommender/scripts/sync_to_pinecone.py
+根据检查结果，向用户展示将要执行的操作摘要：
+
+```
+📋 同步计划
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+索引名称:  claude-plugins-recommender
+操作:      [创建索引（如不存在）] → [清理过期记录] → [上传数据]
+
+涉及命名空间（预期记录数）:
+  claude-plugins-official  — <N> 条
+  claude-community         — <N> 条
+  ecc                      — <N> 条
+  karpathy-skills          — <N> 条
+  mattpocock               — <N> 条
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-脚本自动完成：读取所有市场 marketplace.json → 构造 Pinecone 记录 → 批量 upsert → 验证结果。
+通过 **AskUserQuestion** 让用户确认：
 
-常用选项：
+**选项 A — 执行同步**
+- API Key 已在环境中，直接执行同步：
+  ```bash
+  python3 .claude/skills/plugin-recommender/scripts/sync_to_pinecone.py
+  ```
+- 同步完成后继续「步骤 3」
+
+**选项 B — 先预览变更**
+- 使用 `--dry-run` 预览将要上传的数据：
+  ```bash
+  python3 .claude/skills/plugin-recommender/scripts/sync_to_pinecone.py --dry-run
+  ```
+- 预览后再次询问是否执行同步
+
+**选项 C — 取消**
+- 告知用户：已取消同步，不会对索引做任何修改
+- 结束流程
+
+常用选项说明（同步或预览均可使用）：
 - `--dry-run`：预览模式，不实际上传
 - `--marketplaces official`：只同步指定市场
 - `--batch-size 50`：自定义批大小
