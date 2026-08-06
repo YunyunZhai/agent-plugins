@@ -21,6 +21,20 @@
       "homepage": "https://github.com/YunyunZhai/agent-plugins",
       "repository": "https://github.com/YunyunZhai/agent-plugins",
       "license": "MIT"
+    },
+    {
+      "name": "usage-stats",
+      "source": "./plugins/usage-stats",
+      "description": "本地用量统计状态栏：显示 tp5m/tp5h/rp5m/rp5h/今日累计 token 用量与请求数，通过 hook 逐回合记录，数据存于 ~/.claude/usage-logs/。",
+      "version": "1.0.0",
+      "author": {
+        "name": "YunyunZhai"
+      },
+      "category": "productivity",
+      "tags": ["usage", "tokens", "cost", "statusline", "rate-limit", "monitoring"],
+      "homepage": "https://github.com/YunyunZhai/agent-plugins",
+      "repository": "https://github.com/YunyunZhai/agent-plugins",
+      "license": "MIT"
     }
   ]
 }
