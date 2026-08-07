@@ -26,21 +26,17 @@ token 口径：`input + output + cache_read + cache_creation`。
 
 ## 安装
 
-1. 安装插件后，**UserPromptSubmit hook 自动生效**（无需配置）。
-2. 配置主状态栏（Claude Code 插件**无法原生注入主 statusLine**，需运行一次 setup）：
+安装插件后，**UserPromptSubmit hook 自动生效**，并会**自动配置状态栏**（无需手动跑命令）：
 
-```bash
-python3 <插件安装路径>/scripts/setup.py
-```
-
-这会把插件绝对安装路径写入 `~/.claude/settings.json` 的 `statusLine.command`。
-
-3. 重启 Claude Code，状态栏即显示用量。
+- **无自定义 statusLine** → hook 自动把你的主 statusLine 指向 usage-reader，
+  状态栏即装即用（重启 Claude Code 后显示）。
+- **已有非本插件 statusLine** → hook **不覆盖**，仅提示一次让你手动决定
+  （见下方"冲突处理"）。
 
 ### 冲突处理（已有自定义 statusLine 时）
 
-若 `~/.claude/settings.json` 已有一个**非本插件**的 statusLine，运行 setup.py
-会交互式询问，提供三个选项：
+若 `~/.claude/settings.json` 已有一个**非本插件**的 statusLine，hook 不会覆盖它，
+只返回一条提示。此时你可手动运行 setup.py，它会交互式询问，提供三个选项：
 
 - **1) 覆盖** —— 先把现有 statusLine 备份到
   `~/.claude/.usage-stats-statusline-backup.json`，再写入本插件的。卸载时运行
@@ -49,7 +45,7 @@ python3 <插件安装路径>/scripts/setup.py
 - **3) 手动拼接** —— 打印拼接方法，由你把自己的 statusline 脚本与
   usage-reader 合并（见下）。
 
-若没有 statusLine，或当前 statusLine 已是本插件的，则直接写入/刷新，不询问。
+若没有 statusLine，或当前 statusLine 已是本插件的，则 hook 自动写入/刷新，不询问。
 
 ## 手动拼接（不覆盖你的 statusLine）
 
