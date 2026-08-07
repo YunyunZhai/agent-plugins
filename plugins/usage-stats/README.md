@@ -27,7 +27,7 @@ token 口径：`input + output + cache_read + cache_creation`。
 ## 安装
 
 1. 安装插件后，**UserPromptSubmit hook 自动生效**（无需配置）。
-2. 配置状态栏（插件无法自动注入主状态栏，需运行一次 setup）：
+2. 配置主状态栏（Claude Code 插件**无法原生注入主 statusLine**，需运行一次 setup）：
 
 ```bash
 python3 <插件安装路径>/scripts/setup.py
@@ -37,6 +37,36 @@ python3 <插件安装路径>/scripts/setup.py
 
 3. 重启 Claude Code，状态栏即显示用量。
 
+### 冲突处理（已有自定义 statusLine 时）
+
+若 `~/.claude/settings.json` 已有一个**非本插件**的 statusLine，运行 setup.py
+会交互式询问，提供三个选项：
+
+- **1) 覆盖** —— 先把现有 statusLine 备份到
+  `~/.claude/.usage-stats-statusline-backup.json`，再写入本插件的。卸载时运行
+  `--uninstall` 会**自动还原**备份的原 statusLine。
+- **2) 不安装退出** —— 不改动任何配置。
+- **3) 手动拼接** —— 打印拼接方法，由你把自己的 statusline 脚本与
+  usage-reader 合并（见下）。
+
+若没有 statusLine，或当前 statusLine 已是本插件的，则直接写入/刷新，不询问。
+
+## 手动拼接（不覆盖你的 statusLine）
+
+statusLine 只有一条 command。若你想在保留自己状态栏的同时显示用量，可把
+usage-stats 读侧命令追加到你的 statusline 脚本末尾（用 echo 换行）：
+
+```bash
+echo "$( <你的脚本> )"
+python3 <插件安装路径>/scripts/usage-reader.py
+```
+
+若你的 `statusLine.command` 直接是一条命令，可一行拼接：
+
+```bash
+bash -c "echo \"$(<你的命令>)\" && python3 <插件安装路径>/scripts/usage-reader.py"
+```
+
 ## 插件更新后
 
 插件更新后安装路径的版本目录会变化，需重跑一次 setup 刷新 statusLine：
@@ -44,6 +74,32 @@ python3 <插件安装路径>/scripts/setup.py
 ```bash
 python3 <新插件安装路径>/scripts/setup.py
 ```
+
+## 卸载
+
+卸载插件后，主 statusLine 不会自动清除（Claude Code 限制）。运行：
+
+```bash
+python3 <插件安装路径>/scripts/setup.py --uninstall
+```
+
+行为取决于是否曾备份：
+
+- **有备份**（曾用选项 1 覆盖）→ 自动**还原**原 statusLine，并删除备份文件。
+- **无备份** 且当前是本插件 → 移除 statusLine 条目。
+- 其他情况 → 提示无需清理。
+
+预览会执行什么：
+
+```bash
+python3 <插件安装路径>/scripts/setup.py --uninstall --dry-run
+```
+
+## 关于 subagentStatusLine
+
+Claude Code 插件唯一原生支持的 statusLine 是 `subagentStatusLine`，但它只在
+**子代理面板**里渲染，不在终端底部的主状态栏，不能满足常驻用量条的需求，
+故本插件默认走主 statusLine + setup.py 的方案。
 
 ## 回填历史用量
 
