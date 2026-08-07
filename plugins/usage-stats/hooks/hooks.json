@@ -1,13 +1,16 @@
 {
-  "UserPromptSubmit": [
-    {
-      "hooks": [
-        {
-          "type": "command",
-          "command": "\"${CLAUDE_PLUGIN_ROOT}\"/hooks/usage-tracker.py",
-          "timeout": 30
-        }
-      ]
-    }
-  ]
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/usage-tracker.py",
+            "args": [],
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
 }
