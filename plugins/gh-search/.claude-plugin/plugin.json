@@ -1,0 +1,14 @@
+{
+  "name": "gh-search",
+  "version": "1.0.0",
+  "description": "GitHub 智能开源项目搜索：根据用户语义检索意图，通过 4 步过滤管线（GraphQL 召回 → 元数据粗筛 → 成熟度指标过滤 → 可选 README 深度增强）召回并精选高赞开源项目，由大模型打分推荐。",
+  "author": {
+    "name": "YunyunZhai"
+  },
+  "repository": "https://github.com/YunyunZhai/agent-plugins",
+  "license": "MIT",
+  "keywords": ["github", "search", "opensource", "recommender", "discovery", "graphql"],
+  "skills": [
+    "./skills/gh-search"
+  ]
+}

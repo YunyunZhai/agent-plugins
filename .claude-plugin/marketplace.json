@@ -35,6 +35,20 @@
       "homepage": "https://github.com/YunyunZhai/agent-plugins",
       "repository": "https://github.com/YunyunZhai/agent-plugins",
       "license": "MIT"
+    },
+    {
+      "name": "gh-search",
+      "source": "./plugins/gh-search",
+      "description": "GitHub 智能开源项目搜索：根据语义意图通过 4 步过滤管线（GraphQL 召回 → 元数据粗筛 → 成熟度指标过滤 → 可选 README 深度增强）召回并精选高赞开源项目，由大模型打分推荐。",
+      "version": "1.0.0",
+      "author": {
+        "name": "YunyunZhai"
+      },
+      "category": "productivity",
+      "tags": ["github", "search", "opensource", "recommender", "discovery", "graphql"],
+      "homepage": "https://github.com/YunyunZhai/agent-plugins",
+      "repository": "https://github.com/YunyunZhai/agent-plugins",
+      "license": "MIT"
     }
   ]
 }

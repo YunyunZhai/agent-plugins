@@ -1,6 +1,18 @@
 # agent-plugins
 
-这是一个 Claude Code 技能/插件仓库，当前包含 `plugin-recommender` 技能。
+这是一个 Claude Code 技能/插件仓库，当前包含以下插件：
+
+- `plugin-recommender`（插件推荐）
+- `usage-stats`（本地用量统计状态栏）
+- `gh-search`（GitHub 智能开源项目搜索）
+
+## gh-search（GitHub 智能开源项目搜索）
+
+根据用户语义检索意图，通过 4 步过滤管线（GraphQL 召回 → 元数据粗筛 → 成熟度指标过滤 → 可选 README 深度增强）从 GitHub 召回并精选高赞开源项目，由大模型打分推荐。
+
+唯一的运行时依赖是已认证的 GitHub CLI（`gh`）。详见 `plugins/gh-search/README.md`。
+
+## plugin-recommender（插件推荐）
 
 ## plugin-recommender（插件推荐）
 
