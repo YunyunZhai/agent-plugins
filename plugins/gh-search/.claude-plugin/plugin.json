@@ -7,7 +7,7 @@
   },
   "repository": "https://github.com/YunyunZhai/agent-plugins",
   "license": "MIT",
-  "keywords": ["github", "search", "opensource", "recommender", "discovery", "graphql"],
+  "keywords": ["github", "search", "opensource", "recommender", "discovery", "graphql", "semantic", "vector", "embeddings", "sqlite-vec"],
   "skills": [
     "./skills/gh-search"
   ]

@@ -28,7 +28,23 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/github_client.py
 
 ## 4 步过滤管线
 
-### Step 1 — GraphQL 原始召回
+### 召回通道选择（Step 0）
+
+技能提供三种召回通道，由检索意图与本地索引状态决定：
+
+| 通道 | 数据源 | 适用 | 脚本 |
+|------|--------|------|------|
+| **1. 关键词** | GitHub GraphQL search | 默认、数据实时 | `search_repos.py` |
+| **2. 语义** | 本地 sqlite-vec 索引（全量抓取 + 嵌入） | 意图是"语义描述"（如"启动快的编码智能体"）| `semantic_search.py` |
+| **3. 并行** | 通道1 + 通道2 union | 兼顾实时性与语义 | 两者各跑后合并 |
+
+**决策规则**：
+- 若意图含明确的仓库名/语言/关键词 → **通道1**（关键词精确）
+- 若意图是模糊的"功能/特质"描述（非关键词）→ **通道2**（语义）
+- 若两者都不确定 / 用户要求"都试" → **通道3**（并行合并，按语义相关性加权排序）
+- 通道2/3 依赖**本地索引已构建**（见下方"索引维护"）；索引缺失时自动回退通道1
+
+### Step 1 — 原始召回
 
 调用脚本，传入用户意图、语言（如能推断）、star 阈值：
 
@@ -47,6 +63,21 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/search_repos.py \
 - 召回 200-400 条，含 `nameWithOwner, description, topics, stars, forks, pushedAt, createdAt, license`
 
 **Step1 输出**：原始召回列表（存在大量语义不匹配、description 为空的项目属正常）。
+
+**通道2 语义召回**（若选定）：
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/semantic_search.py \
+  --query "<用户检索意图>" \
+  --top-k 50 \
+  --min-stars 100 \
+  --json
+```
+
+**说明**：
+- 语义通道对 `name/description/topics` 做向量匹配，能召回"描述不含关键词但语义相关"的项目
+- 输出 `candidates_list` 结构与关键词通道一致，便于通道3 union
+- 按语义距离升序（近者优先）；star 仅作 `--min-stars` 过滤，不作主排序（避免 star 淹没语义差异）
 
 ### Step 2 — 内存粗筛（元数据层，不读 README）
 
@@ -123,4 +154,25 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_readme.py \
 - `gh` 未认证 → 引导 `gh auth login`，不崩溃
 - 单仓库无权限/不存在 → 跳过该仓库，继续处理其余
 - 网络抖动 → 脚本内置重试；仍失败则提示用户重试
+- 语义通道需 `PINECONE_API_KEY` + 本地索引；缺失时报错并回退关键词通道
 - 详见 `references/error-handling.md`
+
+## 索引维护（语义通道的数据源）
+
+语义通道依赖本地 sqlite-vec 索引（`data/gh_search_index.db`），由三个脚本维护：
+
+```bash
+# 1. 首次全量抓取（stars:>100, 约47万仓库, 后台跑数小时, 可 --resume 续）
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_repos.py --stars-min 100
+
+# 2. 嵌入向量（Pinecone 托管嵌入, 按 token 计费; 断点续传）
+PINECONE_API_KEY=<key> python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py
+
+# 3. 每周增量（抓近7天新活跃仓库, 只嵌入新增）
+PINECONE_API_KEY=<key> python3 ${CLAUDE_PLUGIN_ROOT}/scripts/incremental_update.py --since 7
+```
+
+- **数据库**：`plugins/gh-search/data/gh_search_index.db`（可用 `GH_SEARCH_DB` 覆盖）
+- **依赖**：`pip install --user sqlite-vec`（本地向量库）+ Pinecone SDK（嵌入）
+- **嵌入模型**：`llama-text-embed-v2`（1024 维，中文友好）
+- 索引未构建时，SKILL 自动使用**通道1关键词**，不影响基本功能
