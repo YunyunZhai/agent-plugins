@@ -18,9 +18,10 @@
     python3 build_index.py --db /path/to.db         # 指定数据库
 
 环境变量:
-    PINECONE_API_KEY  - Pinecone API 密钥(必需)
-    PINECONE_MODEL    - 嵌入模型(默认 llama-text-embed-v2)
-    GH_SEARCH_DB      - sqlite 路径
+    PINECONE_EMBED_KEY - 嵌入专用密钥(优先; 逗号分隔多账号自动轮换)
+    PINECONE_API_KEY   - 回落密钥(二者至少设一个)
+    PINECONE_MODEL     - 嵌入模型(默认 llama-text-embed-v2)
+    GH_SEARCH_DB       - sqlite 路径
 """
 
 import argparse
