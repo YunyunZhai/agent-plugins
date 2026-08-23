@@ -205,7 +205,8 @@ class RepoFetcher:
                     regions.append({"star_fmt": f"{start}..{s-1}", "date_fmt": full_window, "count": acc})
                     start, acc = None, 0
                 for ds, de in TIME_WINDOWS:
-                    regions.append({"star_fmt": f"{s}..{s}", "date_fmt": f"{ds}..{de}", "count": None})
+                    cw = self.batch_count([(f"{s}..{s}", f"{ds}..{de}")])[0]
+                    regions.append({"star_fmt": f"{s}..{s}", "date_fmt": f"{ds}..{de}", "count": cw})
                 continue
             if start is None:
                 start, acc = s, c
@@ -237,7 +238,8 @@ class RepoFetcher:
             if b - a <= 0:
                 # 单星值仍超限（理论不会在高段出现）：按时间窗拆
                 for ds, de in TIME_WINDOWS:
-                    regions.append({"star_fmt": f"{a}..{b}", "date_fmt": f"{ds}..{de}", "count": None})
+                    cw = self.batch_count([(f"{a}..{b}", f"{ds}..{de}")])[0]
+                    regions.append({"star_fmt": f"{a}..{b}", "date_fmt": f"{ds}..{de}", "count": cw})
                 continue
             mid = (a + b) // 2
             candidates.append((a, mid, date_fmt, width))
