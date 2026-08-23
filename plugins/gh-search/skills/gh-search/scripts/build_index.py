@@ -38,7 +38,6 @@ from sqlite_store import (
     connect,
     count_repos,
     count_vectors,
-    is_embedded,
     list_all_repo_ids,
     record_embed,
     upsert_vec,
@@ -52,20 +51,13 @@ class EmbedError(RuntimeError):
     """嵌入失败"""
 
 
-def get_pinecone():
-    """初始化 Pinecone 客户端；缺 API key 抛 EmbedError。"""
-    key = os.environ.get("PINECONE_API_KEY", "")
-    if not key:
-        raise EmbedError("未设置 PINECONE_API_KEY 环境变量")
-    try:
-        from pinecone import Pinecone
-    except ImportError:
-        raise EmbedError("缺少 pinecone 库: pip install --user pinecone")
-    return Pinecone(api_key=key)
+class QuotaExhausted(EmbedError):
+    """当月嵌入 token 配额用尽的标志（Pinecone 429 RESOURCE_EXHAUSTED）。
+    提示嵌入脚本应切换到下一个可用账号继续。"""
 
 
 def embed_batch(pc, model: str, texts: List[str]) -> List[List[float]]:
-    """调 Pinecone embed 一批文本，返回向量列表。失败抛 EmbedError。"""
+    """调 Pinecone embed 一批文本，返回向量列表。配额耗尽抛 QuotaExhausted。"""
     try:
         r = pc.inference.embed(
             model=model,
@@ -73,6 +65,9 @@ def embed_batch(pc, model: str, texts: List[str]) -> List[List[float]]:
             parameters={"input_type": "passage", "truncate": "END"},
         )
     except Exception as e:
+        s = str(e)
+        if "429" in s or "RESOURCE_EXHAUSTED" in s:
+            raise QuotaExhausted(s)
         raise EmbedError(f"嵌入失败: {e}")
     return [d.values for d in r.data]
 
@@ -85,15 +80,32 @@ def build_index(db_path: Optional[str] = None, limit: int = DEFAULT_LIMIT,
                用于 monthly 变化检测：embed_text 变了的仓库需要重新嵌入。
     """
     conn = connect(db_path)
-    pc = None if dry_run else get_pinecone()
+
+    # 多个嵌入账号（逗号分隔）自动轮换：一个撞 429 配额后切下一个继续
+    _keys = [
+        k.strip() for k in (
+            os.environ.get("PINECONE_EMBED_KEY", "") or os.environ.get("PINECONE_API_KEY", "")
+        ).split(",") if k.strip()
+    ]
+    if not _keys:
+        raise EmbedError("未设置 PINECONE_EMBED_KEY 或 PINECONE_API_KEY 环境变量")
+    if dry_run:
+        pc = None
+    else:
+        from pinecone import Pinecone
+        try:
+            pc = Pinecone(api_key=_keys[0])
+        except ImportError:
+            raise EmbedError("缺少 pinecone 库: pip install --user pinecone")
 
     if force_ids:
         # 只处理指定 id（强制重嵌, 不跳过已嵌入的）
         todo = list(force_ids)
     else:
-        # 读全部未嵌入仓库
+        # 读全部未嵌入仓库（一次拉出已嵌入 id 集合, 内存判定, 避免逐条查库）
         ids = list_all_repo_ids(conn)
-        todo = [i for i in ids if not is_embedded(conn, i)]
+        embedded = {r["id"] for r in conn.execute("SELECT id FROM repo_vectors")}
+        todo = [i for i in ids if i not in embedded]
     if limit:
         todo = todo[:limit]
     total = len(todo)
@@ -115,7 +127,35 @@ def build_index(db_path: Optional[str] = None, limit: int = DEFAULT_LIMIT,
             row = conn.execute("SELECT embed_text FROM repos WHERE id=?", (i,)).fetchone()
             texts.append(row["embed_text"] if row else "")
 
-        vectors = embed_batch(pc, model, texts)
+        # 嵌入这一批；配额耗尽时轮换下一个账号（若还有）；
+        # 偶发网关错误(504/超时等)指数退避重试, 避免长跑任务被单次抖动打断
+        vectors = None
+        attempts = 0
+        while vectors is None:
+            try:
+                vectors = embed_batch(pc, model, texts)
+            except QuotaExhausted:
+                key_idx = getattr(pc, "_embed_key_idx", 0)
+                next_idx = key_idx + 1
+                if next_idx >= len(_keys):
+                    print(f"\n[quota] 全部 {len(_keys)} 个嵌入账号当月配额均耗尽, 停止。"
+                          f"已嵌 {done}/{total} 条, 剩余部分断点续传: "
+                          f"重设 PINECONE_EMBED_KEY 后重跑即可。")
+                    break
+                print(f"  [quota] 嵌入账号{key_idx} 配额耗尽, 切换到账号{next_idx}...")
+                pc = Pinecone(api_key=_keys[next_idx])
+                pc._embed_key_idx = next_idx
+            except EmbedError as e:
+                attempts += 1
+                if attempts >= 4:
+                    raise
+                wait = min(5 * 2 ** (attempts - 1), 40)
+                print(f"  [retry] {e}\n  [retry] {wait}s 后第 {attempts}/3 次重试...")
+                time.sleep(wait)
+
+        if vectors is None:  # 全部账号配额耗尽，stop
+            break
+
         for i, vec, text in zip(batch_ids, vectors, texts):
             if len(vec) != EMBED_DIM:
                 print(f"  [warn] {i}: 维度 {len(vec)} != {EMBED_DIM}, 跳过")
