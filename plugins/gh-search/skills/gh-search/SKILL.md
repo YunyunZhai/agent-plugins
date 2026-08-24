@@ -159,31 +159,50 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_readme.py \
 
 ## 索引维护（语义通道的数据源）
 
-语义通道依赖本地 sqlite-vec 索引，由三个脚本维护。**索引库按嵌入模型分版本**（查询后端必须与库的模型一致）：
-
-| 库文件 | 模型 | 维度 | 查询后端 |
-|--------|------|------|----------|
-| `gh_search_index.db` | llama-text-embed-v2 (Pinecone) | 1024 | `--backend pinecone`（默认） |
-| `gh_search_index_v2.db` | doubao-embedding-vision (方舟) | 2048 | `--backend ark` + `GH_SEARCH_EMBED_DIM=2048` |
-| `gh_search_index_v3.db` | BAAI/bge-m3 int8 ONNX（本地） | 1024 | `--backend local` |
+语义通道依赖本地 sqlite-vec 索引。**当前生产库为 `gh_search_index_v3.db`**
+（bge-m3 fp32，1024 维，43 万仓库全量，Kaggle 免费 T4 批量产出）。
+架构细节与决策依据见 `references/architecture.md`，踩坑实录见
+`references/embedding-engineering-notes.md`。
 
 ```bash
-# 1. 首次全量抓取（stars:>100, 约47万仓库, 后台跑数小时, 可 --resume 续）
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_repos.py --stars-min 100
+# 查询（生产姿势；后端必须与库的模型一致）
+GH_SEARCH_BACKEND=local GH_SEARCH_DB=<插件data目录>/gh_search_index_v3.db \
+  python3 ${CLAUDE_PLUGIN_ROOT}/scripts/semantic_search.py --query "..." --top-k 15
 
-# 2. 嵌入向量（断点续传; 三种后端任选, 本地后端无限速零成本）
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py --backend local --db <v3库路径>
-PINECONE_API_KEY=<key> python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py            # pinecone
-PINECONE_EMBED_KEY=<key1,key2> python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py    # 多账号轮换
-ARK_API_KEY=<key> ARK_BASE_URL=<套餐端点> GH_SEARCH_EMBED_DIM=2048 \
-  python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py --backend ark --shard 0:3       # 方舟(支持分片并行)
+# 星数快照刷新（混合排序的先验数据源，覆盖 ≥2000★，每周一次，约 40 分钟）
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_repos.py --sync-stars --db <v3库>
 
-# 3. 每周增量（抓近7天新活跃仓库, 只嵌入新增）
+# 增量补嵌新仓库（断点续传，自动跳过已有）
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py --backend local --db <v3库>
+
+# 全量重建走 Kaggle GPU（60 条/s）：导出→T4 嵌入→回导，
+# 见 references/colab_gpu_embedding.md 与 scripts/import_gpu_vectors.py
+
+# 每周增量抓取近 7 天新活跃仓库
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/incremental_update.py --since 7
 ```
 
-- **数据库**：默认 `plugins/gh-search/data/gh_search_index.db`（可用 `GH_SEARCH_DB` 覆盖；v2/v3 库需 `--db` 显式指定）
-- **本地模型**：bge-m3 int8 ONNX，i5-7500 实测 ~3.5 条/s，质量与豆包相当且无配额限制
-- **依赖**：`pip install sqlite-vec sentence-transformers onnxruntime`（本地后端）；方舟/Pinecone 各需对应 SDK 与密钥
+排序机制：`score = 语义距离 − 0.08·log10(1+stars快照)`——深窗口 k=4000 召回 +
+star 先验救回元数据稀疏的头部项目（alist 实测从全库第 1361 名升至第 1）；
+`--pure-semantic` 回退纯距离排序。
+
+<details>
+<summary>历史/备用后端（legacy）</summary>
+
+| 库文件 | 模型 | 维度 | 查询后端 |
+|--------|------|------|----------|
+| gh_search_index.db | llama-text-embed-v2 (Pinecone) | 1024 | `--backend pinecone` |
+| gh_search_index_v2.db | doubao-embedding-vision (方舟) | 2048 | `--backend ark` + `GH_SEARCH_EMBED_DIM=2048` |
+
+```bash
+# Pinecone 后端（多账号轮换：PINECONE_EMBED_KEY=key1,key2）
+PINECONE_API_KEY=<key> python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py
+# 方舟后端（--shard i:n 多 key 分片并行；注意 plan/coding 端点不同）
+ARK_API_KEY=<key> ARK_BASE_URL=<套餐端点> GH_SEARCH_EMBED_DIM=2048 \
+  python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py --backend ark --shard 0:3
+```
+</details>
+
 - **README 双通道（预留）**：`repo_readme_vectors` 表已建，待 README 抓取管线落地后启用，检索时自动取双表最小距离
+- **依赖**：本地后端需 `pip install sqlite-vec sentence-transformers onnxruntime`；方舟/Pinecone 各需对应 SDK 与密钥
 - 索引未构建时，SKILL 自动使用**通道1关键词**，不影响基本功能
