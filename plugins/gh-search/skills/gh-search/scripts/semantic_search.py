@@ -171,11 +171,10 @@ def semantic_search(
     if len(qvec) != EMBED_DIM:
         raise SemanticError(f"query 向量维度 {len(qvec)} != {EMBED_DIM}")
 
-    # kNN 召回（sqlite-vec 返回按距离升序）。
-    # 混合模式下窗口放宽到 top_k×10：star 先验只能重排已召回的候选，
-    # 窗口太浅时头部项目（如 alist 距离 1.25 > 第100名的 ~1.19）根本进不了池子。
-    # sqlite-vec 是全库暴力扫描，取 500 与取 100 成本几乎相同。
-    knn_k = max(top_k * 10, 500) if star_weight > 0 else max(top_k * 2, 20)
+    # 混合模式窗口固定拉满到 vec0 上限 4096：star 先验只能重排已召回的候选，
+    # 元数据稀疏的头部项目（alist 实测全库第 ~1400 名）必须先进池子才有的救。
+    # sqlite-vec 是全库暴力扫描，深堆与浅堆成本几乎相同。
+    knn_k = 4000 if star_weight > 0 else max(top_k * 2, 20)
 
     # 各查询路: 中文(必有) + 英文(--dual-query)
     hit_lists: List[List[Dict[str, Any]]] = [search_knn(conn, qvec, k=knn_k)]
@@ -222,17 +221,11 @@ def semantic_search(
         return {"query": query, "mode": "semantic", "recalled": recalled,
                 "candidates": 0, "candidates_list": [], "note": "无候选。"}
 
-    # 在线批量拉最新 stars
-    sys.path.insert(0, str(Path(__file__).parent))
-    from github_client import GitHubClient
-    client = GitHubClient()
-    ids = [repo["id"] for repo, _ in candidates]
-    live_stars = fetch_live_stars(ids, client)
-
-    # 组装 + 在线 stars 过滤
+    # 打分用本地 star 快照（repos.stars, 允许周级陈旧）——深窗口下对数千候选
+    # 逐个在线拉 star 不可行（130+ GraphQL 批次）；仅最终 top_k 在线刷新展示值
     out: List[Dict[str, Any]] = []
     for repo, dist in candidates:
-        stars = live_stars.get(repo["id"], 0)
+        stars = int(repo.get("stars") or 0)
         if stars < min_stars:
             continue
         topics = repo.get("topics") or []
@@ -246,7 +239,8 @@ def semantic_search(
             "description": repo.get("description"),
             "topics": topics,
             "primary_language": repo.get("primary_language"),
-            "stars": stars,                              # 在线最新值
+            "stars": stars,                              # 本地快照值（打分用）
+            "_stars_live": None,
             "is_fork": bool(repo.get("is_fork")),
             "is_archived": bool(repo.get("is_archived")),
             "_semantic_distance": round(dist, 4),
@@ -257,12 +251,26 @@ def semantic_search(
         for c in out:
             c["_score"] = round(hybrid_score(c["_semantic_distance"], c["stars"], star_weight), 4)
         out.sort(key=lambda c: c["_score"])
-        note = (f"混合排序：score = 语义距离 − {star_weight}·log10(1+stars)，"
+        note = (f"混合排序：score = 语义距离 − {star_weight}·log10(1+stars快照)，"
                 "兼顾语义相关性与项目成熟度；--pure-semantic 可回退纯距离排序。")
     else:
         out.sort(key=lambda c: c.get("_semantic_distance", 1e9))
         note = "纯语义排序（距离升序），star 仅作过滤不作排序（避免 star 淹没语义差异）。"
     out = out[:top_k]
+
+    # 仅对最终 top_k 在线刷新实时 stars（展示精度；失败保留快照值）
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from github_client import GitHubClient
+        client = GitHubClient()
+        live = fetch_live_stars([c["full_name"] for c in out], client)
+        for c in out:
+            if c["full_name"] in live:
+                c["stars"] = live[c["full_name"]]
+                c["_stars_live"] = True
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ 实时 stars 刷新失败，使用快照值: {e}", file=sys.stderr)
+
     return {
         "query": query,
         "mode": "semantic",

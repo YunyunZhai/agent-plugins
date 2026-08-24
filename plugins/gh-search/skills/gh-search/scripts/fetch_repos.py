@@ -426,11 +426,13 @@ def sync_stars(client: GitHubClient, conn, min_stars: int = 2000,
     lo = min_stars
     while lo <= star_max:
         hi = min(lo * 2 - 1, star_max)      # 倍增窗口 [lo, 2lo)
+        before = len(mapping)
         _collect_range(lo, hi)
+        from sqlite_store import upsert_stars
+        upsert_stars(conn, mapping)          # 每段完成即增量落库
+        print(f"[stars] {lo}..{hi}: 本段 +{len(mapping) - before}, 累计 {len(mapping)}", flush=True)
         lo = hi + 1
 
-    from sqlite_store import upsert_stars
-    upsert_stars(conn, mapping)
     print(f"[stars] 同步 {len(mapping)} 条 star 快照（{calls} 次 REST 调用）")
     return len(mapping)
 

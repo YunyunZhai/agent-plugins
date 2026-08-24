@@ -31,31 +31,44 @@ class GitHubClient:
         self.timeout = timeout or int(__import__("os").environ.get("GH_SEARCH_TIMEOUT", "60"))
 
     def _run_gh(self, args: List[str], stdin: Optional[str] = None) -> Dict[str, Any]:
-        """执行 gh api 子命令并返回解析后的 JSON；失败抛出 GitHubError。"""
-        cmd = ["gh", "api"] + args
-        try:
-            proc = subprocess.run(
-                cmd,
-                input=stdin,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-            )
-        except FileNotFoundError:
-            raise GitHubError(
-                "未找到 `gh` 命令。请先安装 GitHub CLI：https://cli.github.com/"
-            )
-        except subprocess.TimeoutExpired:
-            raise GitHubError(f"GitHub API 调用超时（{self.timeout}s）：{' '.join(cmd)}")
+        """执行 gh api 子命令并返回解析后的 JSON；失败抛出 GitHubError。
 
-        if proc.returncode != 0:
-            err = (proc.stderr or "").strip()
-            raise GitHubError(f"GitHub API 失败（exit {proc.returncode}）：{err}")
+        瞬时网络错误（fake-ip 链路抖动导致的 timeout/reset）自动重试 3 次。
+        """
+        last_err: Optional[str] = None
+        for attempt in range(3):
+            cmd = ["gh", "api"] + args
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    input=stdin,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                )
+            except FileNotFoundError:
+                raise GitHubError(
+                    "未找到 `gh` 命令。请先安装 GitHub CLI：https://cli.github.com/"
+                )
+            except subprocess.TimeoutExpired:
+                raise GitHubError(f"GitHub API 调用超时（{self.timeout}s）：{' '.join(cmd)}")
 
-        try:
-            return json.loads(proc.stdout)
-        except json.JSONDecodeError:
-            raise GitHubError(f"GitHub API 返回非 JSON：{proc.stdout[:200]}")
+            if proc.returncode != 0:
+                err = (proc.stderr or "").strip()
+                # fake-ip 链路瞬断可重试；其余（401/404/422 等）直接抛出
+                if ("i/o timeout" in err or "connection reset" in err.lower()
+                        or "EOF" in err) and attempt < 2:
+                    last_err = err
+                    import time as _t
+                    _t.sleep(2 ** attempt)
+                    continue
+                raise GitHubError(f"GitHub API 失败（exit {proc.returncode}）：{err}")
+
+            try:
+                return json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                raise GitHubError(f"GitHub API 返回非 JSON：{proc.stdout[:200]}")
+        raise GitHubError(f"GitHub API 重试耗尽：{last_err}")
 
     def graphql(self, query: str, variables: Optional[Dict] = None) -> Dict[str, Any]:
         """执行 GraphQL 查询。返回 data 部分；有 errors 时抛 GitHubError。"""
@@ -69,8 +82,9 @@ class GitHubClient:
         return result.get("data", {})
 
     def rest(self, path: str, params: Optional[Dict] = None) -> Dict[str, Any]:
-        """执行 REST 调用。path 以 / 开头；params 为查询参数。"""
-        args = [path]
+        """执行 REST 调用。path 以 / 开头；params 为查询参数（显式 GET，
+        否则 gh api 会把 -f 参数当 POST body 导致搜索类端点 404）。"""
+        args = ["--method", "GET", path]
         if params:
             for k, v in params.items():
                 args += ["-f", f"{k}={v}"]

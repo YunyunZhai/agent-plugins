@@ -28,7 +28,7 @@ def main(npz_path: str) -> None:
     print(f"载入 {len(ids)} 条向量, 维度 {vecs.shape[1]}, "
           f"norm 范围 [{norms.min():.4f}, {norms.max():.4f}]（应接近 1.0）")
 
-    conn = ss.connect(SCRIPTS.parent.parent / "data" / "gh_search_index_v3.db")
+    conn = ss.connect(SCRIPTS.parents[2] / "data" / "gh_search_index_v3.db")
     known = {r["id"] for r in conn.execute("SELECT id FROM repos")}
     missing = [i for i in ids if i not in known]
     print(f"库内元数据 {len(known)} 条, 包中缺失于库的 id: {len(missing)}")
@@ -36,8 +36,12 @@ def main(npz_path: str) -> None:
     inserted = 0
     for k in range(0, len(ids), 500):
         chunk = list(zip(ids[k:k + 500], vecs[k:k + 500]))
+        # vec0 虚拟表不支持 INSERT OR REPLACE，必须显式删除后插入
         conn.executemany(
-            "INSERT OR REPLACE INTO repo_vectors(id, embedding) VALUES (?,?)",
+            "DELETE FROM repo_vectors WHERE id=?", [(rid,) for rid, _ in chunk]
+        )
+        conn.executemany(
+            "INSERT INTO repo_vectors(id, embedding) VALUES (?,?)",
             [(rid, ss._to_blob(v.tolist())) for rid, v in chunk],
         )
         conn.commit()
