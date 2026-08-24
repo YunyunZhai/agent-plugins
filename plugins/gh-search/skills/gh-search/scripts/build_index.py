@@ -62,12 +62,14 @@ def _get_local_model():
                     and os.path.exists(os.path.join(snap, "config.json")):
                 cands.append(snap)
         if not cands:
-            raise EmbedError("未找到含 onnx/model_int8.onnx 的 bge-m3 本地快照")
+            raise EmbedError("未找到含 onnx/model.onnx 的 bge-m3 本地快照")
         snap = os.environ.get("GH_SEARCH_LOCAL_MODEL", sorted(cands)[-1])
         from sentence_transformers import SentenceTransformer
+        # 查询端用 fp32 model.onnx: 与 GPU fp32 批量语料保持数值同源
+        # (int8 文件保留用于离线批量, 两种精度不可混用于同一向量空间)
         _LOCAL_MODEL = SentenceTransformer(
             snap, backend="onnx",
-            model_kwargs={"file_name": "onnx/model_int8.onnx"})
+            model_kwargs={"file_name": "onnx/model.onnx"})
     return _LOCAL_MODEL
 
 
