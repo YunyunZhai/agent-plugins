@@ -53,8 +53,22 @@ def hybrid_score(distance: float, stars: int, star_weight: float) -> float:
     return distance - star_weight * math.log10(1 + max(stars, 0))
 
 
-def embed_query(query: str, model: str = EMBED_MODEL) -> List[float]:
-    """用 Pinecone 把用户 query 嵌入为向量。"""
+def embed_query(query: str, model: str = EMBED_MODEL, backend: str = "pinecone") -> List[float]:
+    """把用户 query 嵌入为向量。backend: pinecone | ark(方舟 doubao) | local(bge-m3)。"""
+    if backend == "ark":
+        try:
+            from ark_client import ArkEmbed
+            return ArkEmbed().embed([query])[0]
+        except Exception as e:
+            raise SemanticError(f"方舟 query 嵌入失败: {e}")
+    if backend == "local":
+        try:
+            from build_index import _get_local_model
+            v = _get_local_model().encode([query], normalize_embeddings=True,
+                                          show_progress_bar=False)
+            return v[0].tolist()
+        except Exception as e:
+            raise SemanticError(f"本地模型 query 嵌入失败: {e}")
     key = os.environ.get("PINECONE_API_KEY", "")
     if not key:
         raise SemanticError("未设置 PINECONE_API_KEY 环境变量")
@@ -145,6 +159,7 @@ def semantic_search(
     model: str = EMBED_MODEL,
     star_weight: float = DEFAULT_STAR_WEIGHT,
     dual_query: bool = False,
+    backend: str = "pinecone",
 ) -> Dict[str, Any]:
     """主流程：嵌入 → kNN 召回 → 在线拉最新 stars → 过滤 → 排序 → 截断输出。
 
@@ -152,7 +167,7 @@ def semantic_search(
     放宽到 top_k×10（让头部项目有进入候选池的机会）；= 0 时回退纯距离排序。
     """
     conn = connect(db_path)
-    qvec = embed_query(query, model)
+    qvec = embed_query(query, model, backend)
     if len(qvec) != EMBED_DIM:
         raise SemanticError(f"query 向量维度 {len(qvec)} != {EMBED_DIM}")
 
@@ -162,14 +177,32 @@ def semantic_search(
     # sqlite-vec 是全库暴力扫描，取 500 与取 100 成本几乎相同。
     knn_k = max(top_k * 10, 500) if star_weight > 0 else max(top_k * 2, 20)
 
-    # 双语查询：中文意图 → LLM 英文翻译，两路分别 kNN 后 RRF 融合
+    # 各查询路: 中文(必有) + 英文(--dual-query)
     hit_lists: List[List[Dict[str, Any]]] = [search_knn(conn, qvec, k=knn_k)]
     en_text = None
     if dual_query:
         en_text = translate_to_english(query)
         if en_text:
             print(f"[dual] EN: {en_text}", file=sys.stderr)
-            hit_lists.append(search_knn(conn, embed_query(en_text, model), k=knn_k))
+            hit_lists.append(search_knn(conn, embed_query(en_text, model, backend),
+                                        k=knn_k))
+
+    # README 双通道: 每路结果与 README 表按 id 取最小距离（同模型同空间可直接比较）
+    try:
+        has_readme = count_readme_vectors(conn) > 0
+    except Exception:
+        has_readme = False
+    if has_readme:
+        def _with_readme(hl):
+            merged = {h["id"]: h["distance"] for h in hl}
+            for h in search_knn(conn, qvec, k=knn_k, table="repo_readme_vectors"):
+                rid, d = h["id"], h["distance"]
+                if rid not in merged or d < merged[rid]:
+                    merged[rid] = d
+            return sorted(({"id": i, "distance": d} for i, d in merged.items()),
+                          key=lambda x: x["distance"])
+        hit_lists = [_with_readme(hl) for hl in hit_lists]
+
     hits = _fuse_knn(hit_lists) if len(hit_lists) > 1 else hit_lists[0]
 
     # 收集候选 id（先排除 fork/archived 硬过滤）
@@ -255,6 +288,9 @@ def main():
                         help="回退纯语义距离排序（等价 --star-weight 0）")
     parser.add_argument("--dual-query", action="store_true",
                         help="中英双语查询 RRF 融合（LLM 翻译，需 ARK_API_KEY）")
+    parser.add_argument("--backend", choices=["pinecone", "ark", "local"],
+                        default=os.environ.get("GH_SEARCH_BACKEND", "pinecone"),
+                        help="查询嵌入后端（须与目标库向量模型一致；默认取 GH_SEARCH_BACKEND）")
     parser.add_argument("--db", default=None, help="sqlite 路径")
     parser.add_argument("--json", action="store_true", help="仅输出 JSON")
     args = parser.parse_args()
@@ -263,7 +299,7 @@ def main():
     try:
         result = semantic_search(args.query, args.top_k, args.min_stars,
                                  db_path=args.db, star_weight=star_weight,
-                                 dual_query=args.dual_query)
+                                 dual_query=args.dual_query, backend=args.backend)
     except SemanticError as e:
         print(f"❌ {e}", file=sys.stderr)
         sys.exit(1)

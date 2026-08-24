@@ -47,6 +47,37 @@ from sqlite_store import (
 EMBED_BATCH = 96          # Pinecone embed 单批上限（实测兼容）
 DEFAULT_LIMIT = 0         # 0 = 全部
 
+_LOCAL_MODEL = None       # 进程内缓存，避免重复加载
+
+
+def _get_local_model():
+    """加载本地 bge-m3 int8 ONNX 模型（进程内单例）。"""
+    global _LOCAL_MODEL
+    if _LOCAL_MODEL is None:
+        import glob
+        cands = []
+        for snap in glob.glob(os.path.expanduser(
+                "~/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots/*/")):
+            if os.path.exists(os.path.join(snap, "onnx", "model_int8.onnx")) \
+                    and os.path.exists(os.path.join(snap, "config.json")):
+                cands.append(snap)
+        if not cands:
+            raise EmbedError("未找到含 onnx/model_int8.onnx 的 bge-m3 本地快照")
+        snap = os.environ.get("GH_SEARCH_LOCAL_MODEL", sorted(cands)[-1])
+        from sentence_transformers import SentenceTransformer
+        _LOCAL_MODEL = SentenceTransformer(
+            snap, backend="onnx",
+            model_kwargs={"file_name": "onnx/model_int8.onnx"})
+    return _LOCAL_MODEL
+
+
+def embed_batch_local(texts: List[str], model_name: str) -> List[List[float]]:
+    """本地 bge-m3 嵌入；归一化输出使 L2 距离与余弦序一致。"""
+    m = _get_local_model()
+    vecs = m.encode(texts, batch_size=min(len(texts), 64),
+                    normalize_embeddings=True, show_progress_bar=False)
+    return [v.tolist() for v in vecs]
+
 
 class EmbedError(RuntimeError):
     """嵌入失败"""
@@ -75,29 +106,43 @@ def embed_batch(pc, model: str, texts: List[str]) -> List[List[float]]:
 
 def build_index(db_path: Optional[str] = None, limit: int = DEFAULT_LIMIT,
                 model: str = EMBED_MODEL, batch: int = EMBED_BATCH,
-                dry_run: bool = False, force_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+                dry_run: bool = False, force_ids: Optional[List[str]] = None,
+                backend: str = "pinecone", shard: Optional[str] = None) -> Dict[str, Any]:
     """主流程。返回统计 dict。
     force_ids: 若指定，则只处理这些 id（忽略本已嵌入检查，强制重嵌）。
                用于 monthly 变化检测：embed_text 变了的仓库需要重新嵌入。
+    backend:   pinecone(llama-text-embed-v2, 1024维) | ark(doubao-embedding-vision, 2048维)。
+               ark 后端须 GH_SEARCH_EMBED_DIM=2048 且目标库为对应维度新建。
     """
     conn = connect(db_path)
 
-    # 多个嵌入账号（逗号分隔）自动轮换：一个撞 429 配额后切下一个继续
-    _keys = [
-        k.strip() for k in (
-            os.environ.get("PINECONE_EMBED_KEY", "") or os.environ.get("PINECONE_API_KEY", "")
-        ).split(",") if k.strip()
-    ]
-    if not _keys:
-        raise EmbedError("未设置 PINECONE_EMBED_KEY 或 PINECONE_API_KEY 环境变量")
-    if dry_run:
-        pc = None
-    else:
-        from pinecone import Pinecone
+    _ark = None
+    _keys: List[str] = []
+    pc = None
+    if backend == "ark":
+        from ark_client import ArkEmbed
         try:
-            pc = Pinecone(api_key=_keys[0])
-        except ImportError:
-            raise EmbedError("缺少 pinecone 库: pip install --user pinecone")
+            _ark = ArkEmbed()
+        except Exception as e:  # noqa: BLE001
+            raise EmbedError(str(e))
+    elif backend == "local":
+        if not dry_run:
+            _get_local_model()   # 提前加载，失败即报
+    else:
+        # 多个嵌入账号（逗号分隔）自动轮换：一个撞 429 配额后切下一个继续
+        _keys = [
+            k.strip() for k in (
+                os.environ.get("PINECONE_EMBED_KEY", "") or os.environ.get("PINECONE_API_KEY", "")
+            ).split(",") if k.strip()
+        ]
+        if not _keys:
+            raise EmbedError("未设置 PINECONE_EMBED_KEY 或 PINECONE_API_KEY 环境变量")
+        if not dry_run:
+            from pinecone import Pinecone
+            try:
+                pc = Pinecone(api_key=_keys[0])
+            except ImportError:
+                raise EmbedError("缺少 pinecone 库: pip install --user pinecone")
 
     if force_ids:
         # 只处理指定 id（强制重嵌, 不跳过已嵌入的）
@@ -109,6 +154,10 @@ def build_index(db_path: Optional[str] = None, limit: int = DEFAULT_LIMIT,
         todo = [i for i in ids if i not in embedded]
     if limit:
         todo = todo[:limit]
+    if shard:
+        # 多进程分片: --shard i:n 取第 i 路（与其它 key 的 worker 并行分摊）
+        si, sn = map(int, shard.split(":"))
+        todo = todo[si::sn]
     total = len(todo)
     done = skipped = total_tokens = 0
     t0 = time.time()
@@ -128,13 +177,25 @@ def build_index(db_path: Optional[str] = None, limit: int = DEFAULT_LIMIT,
             row = conn.execute("SELECT embed_text FROM repos WHERE id=?", (i,)).fetchone()
             texts.append(row["embed_text"] if row else "")
 
-        # 嵌入这一批；配额耗尽时轮换下一个账号（若还有）；
+        # 嵌入这一批；配额耗尽时轮换下一个账号（仅 pinecone）；
         # 偶发网关错误(504/超时等)指数退避重试, 避免长跑任务被单次抖动打断
+        # （ark 后端在 ArkEmbed 内部已做 429/瞬断重试限速）
         vectors = None
         attempts = 0
         while vectors is None:
             try:
-                vectors = embed_batch(pc, model, texts)
+                if backend == "ark":
+                    try:
+                        vectors = _ark.embed(texts)
+                    except Exception as e:  # noqa: BLE001
+                        raise EmbedError(f"方舟嵌入失败: {e}")
+                elif backend == "local":
+                    try:
+                        vectors = embed_batch_local(texts, model)
+                    except Exception as e:  # noqa: BLE001
+                        raise EmbedError(f"本地嵌入失败: {e}")
+                else:
+                    vectors = embed_batch(pc, model, texts)
             except QuotaExhausted:
                 key_idx = getattr(pc, "_embed_key_idx", 0)
                 next_idx = key_idx + 1
@@ -188,14 +249,25 @@ def main():
     parser.add_argument("--db", default=None, help="sqlite 路径（默认插件 data 目录）")
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
                         help="只嵌入前 N 条（默认全部）")
-    parser.add_argument("--model", default=EMBED_MODEL, help=f"嵌入模型（默认 {EMBED_MODEL}）")
+    parser.add_argument("--backend", choices=["pinecone", "ark", "local"], default="pinecone",
+                        help="嵌入后端（ark=doubao 2048维 / local=bge-m3 int8 本地, 须配对应维度库）")
+    parser.add_argument("--model", default=None,
+                        help="嵌入模型（默认按 backend: pinecone=llama-text-embed-v2 / ark=doubao-embedding-vision / local=BAAI-bge-m3）")
     parser.add_argument("--batch", type=int, default=EMBED_BATCH,
                         help=f"每批嵌入条数（默认 {EMBED_BATCH}）")
     parser.add_argument("--dry-run", action="store_true", help="只预览不实际嵌入")
+    parser.add_argument("--shard", default=None,
+                        help="分片 i:n（多进程/多 key 并行时各取一路，如 0:2 / 1:2）")
     args = parser.parse_args()
 
+    model = args.model or {
+        "ark": "doubao-embedding-vision",
+        "local": "BAAI/bge-m3(int8-onnx)",
+    }.get(args.backend, EMBED_MODEL)
+
     try:
-        stats = build_index(args.db, args.limit, args.model, args.batch, args.dry_run)
+        stats = build_index(args.db, args.limit, model, args.batch, args.dry_run,
+                            backend=args.backend, shard=args.shard)
         if not args.dry_run and stats.get("embedded", 0) == 0:
             print("[提示] 没有新嵌入。若想强制重建，请删除 embed_status 对应行。")
     except EmbedError as e:

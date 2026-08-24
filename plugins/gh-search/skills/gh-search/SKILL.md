@@ -159,20 +159,31 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_readme.py \
 
 ## 索引维护（语义通道的数据源）
 
-语义通道依赖本地 sqlite-vec 索引（`data/gh_search_index.db`），由三个脚本维护：
+语义通道依赖本地 sqlite-vec 索引，由三个脚本维护。**索引库按嵌入模型分版本**（查询后端必须与库的模型一致）：
+
+| 库文件 | 模型 | 维度 | 查询后端 |
+|--------|------|------|----------|
+| `gh_search_index.db` | llama-text-embed-v2 (Pinecone) | 1024 | `--backend pinecone`（默认） |
+| `gh_search_index_v2.db` | doubao-embedding-vision (方舟) | 2048 | `--backend ark` + `GH_SEARCH_EMBED_DIM=2048` |
+| `gh_search_index_v3.db` | BAAI/bge-m3 int8 ONNX（本地） | 1024 | `--backend local` |
 
 ```bash
 # 1. 首次全量抓取（stars:>100, 约47万仓库, 后台跑数小时, 可 --resume 续）
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_repos.py --stars-min 100
 
-# 2. 嵌入向量（Pinecone 托管嵌入, 按 token 计费; 断点续传）
-PINECONE_API_KEY=<key> python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py
+# 2. 嵌入向量（断点续传; 三种后端任选, 本地后端无限速零成本）
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py --backend local --db <v3库路径>
+PINECONE_API_KEY=<key> python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py            # pinecone
+PINECONE_EMBED_KEY=<key1,key2> python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py    # 多账号轮换
+ARK_API_KEY=<key> ARK_BASE_URL=<套餐端点> GH_SEARCH_EMBED_DIM=2048 \
+  python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py --backend ark --shard 0:3       # 方舟(支持分片并行)
 
 # 3. 每周增量（抓近7天新活跃仓库, 只嵌入新增）
-PINECONE_API_KEY=<key> python3 ${CLAUDE_PLUGIN_ROOT}/scripts/incremental_update.py --since 7
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/incremental_update.py --since 7
 ```
 
-- **数据库**：`plugins/gh-search/data/gh_search_index.db`（可用 `GH_SEARCH_DB` 覆盖）
-- **依赖**：`pip install --user sqlite-vec`（本地向量库）+ Pinecone SDK（嵌入）
-- **嵌入模型**：`llama-text-embed-v2`（1024 维，中文友好）
+- **数据库**：默认 `plugins/gh-search/data/gh_search_index.db`（可用 `GH_SEARCH_DB` 覆盖；v2/v3 库需 `--db` 显式指定）
+- **本地模型**：bge-m3 int8 ONNX，i5-7500 实测 ~3.5 条/s，质量与豆包相当且无配额限制
+- **依赖**：`pip install sqlite-vec sentence-transformers onnxruntime`（本地后端）；方舟/Pinecone 各需对应 SDK 与密钥
+- **README 双通道（预留）**：`repo_readme_vectors` 表已建，待 README 抓取管线落地后启用，检索时自动取双表最小距离
 - 索引未构建时，SKILL 自动使用**通道1关键词**，不影响基本功能

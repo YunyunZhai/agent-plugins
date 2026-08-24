@@ -34,7 +34,9 @@ except ImportError:
 
 # 嵌入模型与维度（须与 build_index.py 的 embedding 模型一致）
 EMBED_MODEL = "llama-text-embed-v2"
-EMBED_DIM = 1024
+# 向量维度可按库切换（1024=llama-text-embed-v2 旧库, 2048=doubao-embedding-vision 新库）。
+# 进程内必须与目标 DB 的实际维度一致，否则 vec0 校验失败。
+EMBED_DIM = int(os.environ.get("GH_SEARCH_EMBED_DIM", "1024"))
 
 # 默认数据库路径：插件 data 目录（plugins/gh-search/data/）
 # 脚本位于 plugins/gh-search/skills/gh-search/scripts/ → 上 4 层到 plugins/gh-search/
@@ -116,13 +118,31 @@ def init_schema(conn: sqlite3.Connection) -> None:
     )
     # vec0 虚拟表只能存在与否检查，不能 CREATE IF NOT EXISTS 重复
     _create_vec_table(conn)
+    _create_readme_vec_table(conn)
+
+    # 迁移：存量库补 readme_embed_text 列（README 双通道的嵌入文本快照）
+    if "readme_embed_text" not in cols:
+        conn.execute(
+            "ALTER TABLE repos ADD COLUMN readme_embed_text TEXT NOT NULL DEFAULT ''"
+        )
+        conn.commit()
 
 
 def _create_vec_table(conn: sqlite3.Connection) -> None:
-    """按需创建 vec0 向量表（幂等）。"""
+    """按需创建主向量表（元数据嵌入通道，幂等）。"""
     if not _table_exists(conn, "repo_vectors"):
         conn.execute(
             f"CREATE VIRTUAL TABLE repo_vectors USING vec0"
+            f"(id TEXT PRIMARY KEY, embedding FLOAT[{EMBED_DIM}])"
+        )
+        conn.commit()
+
+
+def _create_readme_vec_table(conn: sqlite3.Connection) -> None:
+    """按需创建 README 向量表（双通道之二；空表时检索自动回落主通道）。"""
+    if not _table_exists(conn, "repo_readme_vectors"):
+        conn.execute(
+            f"CREATE VIRTUAL TABLE repo_readme_vectors USING vec0"
             f"(id TEXT PRIMARY KEY, embedding FLOAT[{EMBED_DIM}])"
         )
         conn.commit()
@@ -337,15 +357,37 @@ def search_knn(
     conn: sqlite3.Connection,
     query_vec: List[float],
     k: int = 20,
+    table: str = "repo_vectors",
 ) -> List[Dict[str, Any]]:
-    """sqlite-vec kNN 检索，返回 [{id, distance}, ...] 按距离升序。"""
+    """sqlite-vec kNN 检索，返回 [{id, distance}, ...] 按距离升序。
+
+    table 可选 "repo_vectors"(元数据通道) 或 "repo_readme_vectors"(README 通道)。
+    """
     if len(query_vec) != EMBED_DIM:
         raise ValueError(f"查询向量维度 {len(query_vec)} != {EMBED_DIM}")
     rows = conn.execute(
-        "SELECT id, distance FROM repo_vectors WHERE embedding MATCH ? AND k = ?",
+        f"SELECT id, distance FROM {table} WHERE embedding MATCH ? AND k = ?",
         (_to_blob(query_vec), k),
     ).fetchall()
     return [{"id": r["id"], "distance": r["distance"]} for r in rows]
+
+
+def count_readme_vectors(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) FROM repo_readme_vectors").fetchone()[0]
+
+
+def upsert_readme_vec(conn: sqlite3.Connection, repo_id: str,
+                      vec: List[float], readme_text: str) -> None:
+    """写入 README 通道向量 + 文本快照（变化检测/重嵌依据）。"""
+    if len(vec) != EMBED_DIM:
+        raise ValueError(f"嵌入维度 {len(vec)} != 期望 {EMBED_DIM}")
+    conn.execute(
+        "INSERT OR REPLACE INTO repo_readme_vectors(id, embedding) VALUES (?,?)",
+        (repo_id, _to_blob(vec)),
+    )
+    conn.execute(
+        "UPDATE repos SET readme_embed_text=? WHERE id=?", (readme_text, repo_id)
+    )
 
 
 # ══ 便捷入口 ═══════════════════════════════════════════════════════

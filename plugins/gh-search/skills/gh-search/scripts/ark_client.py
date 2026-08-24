@@ -18,8 +18,25 @@
 
 import json
 import os
+import socket
+import sys
+import time
 import urllib.request
 from typing import List, Optional
+
+
+def _force_ipv4() -> None:
+    """过滤 getaddrinfo 结果只留 IPv4。
+
+    本机代理/VPN 的 fake-IP DNS 可能返回不可达地址族（Errno 97），导致长跑进程
+    间歇性全部请求超时/失败而新进程碰巧正常。国内云 API 均有 IPv4，强制之。
+    """
+    _orig = socket.getaddrinfo
+
+    def patched(*args, **kwargs):
+        return [r for r in _orig(*args, **kwargs) if r[0] == socket.AF_INET]
+
+    socket.getaddrinfo = patched
 
 
 class ArkError(RuntimeError):
@@ -50,8 +67,11 @@ class ArkChat:
         }
         if json_mode:
             body["response_format"] = {"type": "json_object"}
+        return self._post("/chat/completions", body)["choices"][0]["message"]["content"]
+
+    def _post(self, path: str, body: dict) -> dict:
         req = urllib.request.Request(
-            self.base_url + "/chat/completions",
+            self.base_url + path,
             data=json.dumps(body).encode(),
             headers={
                 "Authorization": f"Bearer {self.api_key}",
@@ -59,13 +79,79 @@ class ArkChat:
             },
         )
         try:
-            r = json.load(urllib.request.urlopen(req, timeout=60))
+            return json.load(urllib.request.urlopen(req, timeout=120))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode()[:200]
+            raise ArkError(f"方舟 HTTP {e.code}: {detail}")
         except Exception as e:
-            raise ArkError(f"方舟 chat 失败: {e}")
+            raise ArkError(f"方舟请求失败: {e}")
+
+
+class ArkEmbed:
+    """向量化客户端。doubao-embedding-vision, 单请求上限 10 条。
+
+    AFP 计费: 输入 token × 0.335 / 10000（≤32k 输入档）。
+    内置 429 退避与瞬断重试，批量间限速。
+    """
+
+    BATCH = 10               # Embeddings API input limit: max 10
+
+    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None,
+                 model: Optional[str] = None):
+        if os.environ.get("ARK_FORCE_IPV4", "1") != "0":
+            _force_ipv4()
+        self.api_key = api_key or os.environ.get("ARK_API_KEY", "")
+        self.base_url = (base_url or os.environ.get("ARK_BASE_URL", "")
+                         or "https://ark.cn-beijing.volces.com/api/plan/v3").rstrip("/")
+        self.model = model or os.environ.get("ARK_EMBED_MODEL", "doubao-embedding-vision")
+        if not self.api_key:
+            raise ArkError("未设置 ARK_API_KEY 环境变量")
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        """批量向量化；自动按 10 条分批，返回与输入等长的向量列表。"""
+        trace = os.environ.get("ARK_TRACE") == "1"
+        vecs: List[List[float]] = []
+        for i in range(0, len(texts), self.BATCH):
+            chunk = texts[i:i + self.BATCH]
+            req_body = {"model": self.model, "input": chunk}
+            wait = 5.0
+            t0 = time.time()
+            for attempt in range(6):
+                try:
+                    r = self._post_raw("/embeddings", req_body)
+                    break
+                except ArkError as e:
+                    transient = "429" in str(e) or "503" in str(e) or "timeout" in str(e).lower()
+                    if not transient or attempt == 5:
+                        raise
+                    if trace:
+                        print(f"[ark] chunk{i}: attempt{attempt} err={str(e)[:60]} wait{wait:.0f}s",
+                              file=sys.stderr)
+                    time.sleep(wait)
+                    wait = min(wait * 2, 60)
+            dt = time.time() - t0
+            if trace:
+                print(f"[ark] chunk{i}: {len(chunk)}条 {r['usage']['total_tokens']}tok {dt:.2f}s",
+                      file=sys.stderr)
+            vecs += [d["embedding"] for d in r["data"]]
+            time.sleep(0.05)     # 轻微间隔；触发 429 时由上方退避接管
+        return vecs
+
+    def _post_raw(self, path: str, body: dict) -> dict:
+        req = urllib.request.Request(
+            self.base_url + path,
+            data=json.dumps(body).encode(),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+        )
         try:
-            return r["choices"][0]["message"]["content"]
-        except (KeyError, IndexError):
-            raise ArkError(f"方舟响应格式异常: {str(r)[:200]}")
+            return json.load(urllib.request.urlopen(req, timeout=120))
+        except urllib.error.HTTPError as e:
+            raise ArkError(f"HTTP {e.code}: {e.read().decode()[:200]}")
+        except Exception as e:
+            raise ArkError(f"请求失败: {e}")
 
 
 if __name__ == "__main__":
