@@ -81,7 +81,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
     设计（2026-08 精简版）：
     repos 只存「语义相关 + 基本不变」字段，用于向量嵌入与变化检测；
-    动态字段（stars/forks/pushed_at 等）不落库，检索时在线拉取，避免频繁增量。
+    stars 为例外（2026-08 排序先验本地化）：允许周级陈旧，检索时零在线调用。
     """
     conn.execute(
         """
@@ -93,10 +93,16 @@ def init_schema(conn: sqlite3.Connection) -> None:
             primary_language TEXT,                     -- 主语言（语义查询语言维度）
             is_fork         INTEGER NOT NULL DEFAULT 0,
             is_archived     INTEGER NOT NULL DEFAULT 0,
-            embed_text      TEXT NOT NULL DEFAULT ''   -- 构造的嵌入文本（变化检测依据）
+            embed_text      TEXT NOT NULL DEFAULT '',  -- 构造的嵌入文本（变化检测依据）
+            stars           INTEGER NOT NULL DEFAULT 0 -- star 快照（排序先验, 周级陈旧可接受）
         )
         """
     )
+    # 迁移：存量库补 stars 列
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(repos)")}
+    if "stars" not in cols:
+        conn.execute("ALTER TABLE repos ADD COLUMN stars INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS embed_status (
@@ -169,8 +175,8 @@ def insert_new_repo(conn: sqlite3.Connection, repo: Dict[str, Any]) -> bool:
         """
         INSERT OR IGNORE INTO repos (
             id, name, description, topics, primary_language,
-            is_fork, is_archived, embed_text
-        ) VALUES (?,?,?,?,?,?,?,?)
+            is_fork, is_archived, embed_text, stars
+        ) VALUES (?,?,?,?,?,?,?,?,?)
         """,
         (
             repo["id"],
@@ -181,6 +187,7 @@ def insert_new_repo(conn: sqlite3.Connection, repo: Dict[str, Any]) -> bool:
             1 if repo.get("is_fork") else 0,
             1 if repo.get("is_archived") else 0,
             build_embed_text(repo),
+            int(repo.get("stars") or 0),
         ),
     )
     return cur.rowcount > 0
@@ -234,6 +241,13 @@ def repo_exists(conn: sqlite3.Connection, repo_id: str) -> bool:
 def get_repo(conn: sqlite3.Connection, repo_id: str) -> Optional[Dict[str, Any]]:
     row = conn.execute("SELECT * FROM repos WHERE id=?", (repo_id,)).fetchone()
     return dict(row) if row else None
+
+
+def upsert_stars(conn: sqlite3.Connection, mapping: Dict[str, int]) -> None:
+    """批量更新仓库 star 快照（排序先验用，允许周级陈旧）。"""
+    rows = [(int(s), rid) for rid, s in mapping.items() if rid]
+    conn.executemany("UPDATE repos SET stars=? WHERE id=?", rows)
+    conn.commit()
 
 
 def list_all_repo_ids(conn: sqlite3.Connection) -> List[str]:

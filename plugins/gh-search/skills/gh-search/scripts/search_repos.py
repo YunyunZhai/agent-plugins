@@ -50,12 +50,17 @@ def _now() -> datetime:
 
 
 def build_search_query(
+    keywords: str,
     language: str,
     min_stars: int,
     pushed_since: str,
 ) -> str:
-    """构造 Step1 GraphQL search 查询串。"""
-    parts = []
+    """构造 Step1 GraphQL search 查询串。
+
+    2026-08 修复：此前 --query 从未拼进检索式（等于高星活跃仓库随机采样）。
+    现在关键词始终参与搜索；GitHub 裸词会匹配 name/description/topics/readme。
+    """
+    parts = list(keywords.split())
     if language:
         parts.append(f"language:{language}")
     parts.append("is:public")
@@ -66,15 +71,72 @@ def build_search_query(
     return " ".join(parts)
 
 
+def expand_keywords(intent: str) -> Dict[str, List[str]]:
+    """LLM 把检索意图改写成英文+中文关键词组（GitHub search 用）。"""
+    from ark_client import ArkChat
+    ark = ArkChat()
+    prompt = (
+        "你是 GitHub 搜索专家。把用户的检索意图改写成适合 GitHub repository "
+        "search 的关键词组合。\n"
+        "要求：\n"
+        "- en: 2-3 组英文关键词（技术社区惯用叫法），空格分隔单词\n"
+        "- zh: 1-2 组中文关键词（不少中文项目用中文写描述）\n"
+        "- 每组不超过 4 个词，不要加修饰性 stopwords\n"
+        f'用户意图: {intent}\n'
+        '只输出 JSON: {"en": ["kw1 kw2", ...], "zh": ["关键词", ...]}'
+    )
+    raw = ark.chat(prompt, max_tokens=256, json_mode=True)
+    try:
+        data = json.loads(raw)
+        return {
+            "en": [s for s in data.get("en", []) if isinstance(s, str) and s.strip()][:3],
+            "zh": [s for s in data.get("zh", []) if isinstance(s, str) and s.strip()][:2],
+        }
+    except json.JSONDecodeError:
+        return {"en": [intent], "zh": []}
+
+
+def llm_rerank(intent: str, candidates: List[Dict[str, Any]], top_n: int = 40) -> None:
+    """LLM 对候选就地重排（按与意图的相关性降序）。失败则保持原序。"""
+    if not candidates:
+        return
+    from ark_client import ArkChat
+    ark = ArkChat()
+    lines = [
+        f"{i}. {c['full_name']} | {str(c.get('description') or '')[:100]} | "
+        f"{','.join(c.get('topics') or [])[:60]} | {c.get('stars', 0)}★"
+        for i, c in enumerate(candidates[:top_n])
+    ]
+    prompt = (
+        "按与用户意图的相关性给下列 GitHub 仓库排序。\n"
+        f"用户意图: {intent}\n\n仓库列表:\n" + "\n".join(lines) +
+        '\n只输出 JSON: {"order": [索引从0开始, 相关性降序, 不必全排只排前25]}'
+    )
+    try:
+        raw = ark.chat(prompt, max_tokens=300, json_mode=True)
+        order = json.loads(raw).get("order", [])
+        idx = [i for i in order if isinstance(i, int) and 0 <= i < len(candidates)]
+        seen, uniq = set(), []
+        for i in idx:
+            if i not in seen:
+                seen.add(i)
+                uniq.append(i)
+        rest = [i for i in range(len(candidates)) if i not in seen]
+        candidates[:] = [candidates[i] for i in uniq + rest]
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️ LLM 重排失败，保持原序: {e}", file=sys.stderr)
+
+
 def step1_recall(
     client: GitHubClient,
+    keywords: str,
     language: str,
     min_stars: int,
     max_recalls: int,
 ) -> List[Dict[str, Any]]:
     """Step1：分页召回原始仓库列表。"""
     pushed_since = (_now() - timedelta(days=DEFAULT_STALE_DAYS)).strftime("%Y-%m-%d")
-    query = build_search_query(language, min_stars, pushed_since)
+    query = build_search_query(keywords, language, min_stars, pushed_since)
 
     repos: List[Dict[str, Any]] = []
     cursor: str | None = None
@@ -165,33 +227,60 @@ def main() -> None:
                         help=f"最大召回条数（默认 {DEFAULT_MAX_RECALLS}）")
     parser.add_argument("--stale-days", type=int, default=DEFAULT_STALE_DAYS,
                         help=f"超过该天数未推送视为僵尸（默认 {DEFAULT_STALE_DAYS}）")
+    parser.add_argument("--llm-expand", action="store_true", default=True,
+                        help="LLM 把意图改写为英文+中文关键词多路搜索并重排（默认开）")
+    parser.add_argument("--no-llm-expand", dest="llm_expand", action="store_false",
+                        help="关闭 LLM 改写，仅用原始意图文本作为关键词")
     parser.add_argument("--json", action="store_true", help="仅输出 JSON")
     args = parser.parse_args()
 
     client = GitHubClient()
 
     try:
-        raw = step1_recall(client, args.language, args.min_stars, args.max_recalls)
+        # 关键词通道：LLM 双语改写 → 多路搜索 → 合并 → LLM 重排
+        if args.llm_expand:
+            try:
+                kw = expand_keywords(args.query)
+            except Exception as e:  # noqa: BLE001
+                print(f"⚠️ LLM 改写失败，回退原始意图: {e}", file=sys.stderr)
+                kw = {"en": [args.query], "zh": []}
+            variants = kw["en"] + kw["zh"] or [args.query]
+            per_cap = max(30, args.max_recalls // len(variants))
+            print(f"[expand] 搜索变体: {variants}", file=sys.stderr)
+            merged: Dict[str, Dict[str, Any]] = {}
+            for v in variants:
+                try:
+                    raw = step1_recall(client, v, args.language, args.min_stars, per_cap)
+                except Exception as e:  # noqa: BLE001
+                    print(f"⚠️ 变体「{v}」召回失败: {e}", file=sys.stderr)
+                    continue
+                for r in step2_coarse_filter(raw, args.stale_days):
+                    n = _normalize(r)
+                    merged.setdefault(n["full_name"], n)
+            normalized = list(merged.values())
+            llm_rerank(args.query, normalized)
+        else:
+            raw = step1_recall(client, args.query, args.language,
+                               args.min_stars, args.max_recalls)
+            normalized = [_normalize(r) for r in step2_coarse_filter(raw, args.stale_days)]
     except Exception as e:  # noqa: BLE001
         print(f"❌ Step1 召回失败：{e}", file=sys.stderr)
         sys.exit(1)
 
-    if not raw:
+    if not normalized:
         print("⚠️ 未召回任何仓库。可尝试放宽 star 阈值 / 语言 / 活跃窗口。", file=sys.stderr)
         sys.exit(0)
-
-    candidates = step2_coarse_filter(raw, args.stale_days)
-    normalized = [_normalize(r) for r in candidates]
 
     result = {
         "query": args.query,
         "language": args.language,
         "min_stars": args.min_stars,
-        "recalled": len(raw),
+        "recalled": len(normalized),
         "candidates": len(normalized),
         "candidates_list": normalized,
-        "note": ("description 为空的仓库已保留，未作为丢弃条件；"
-                 "语义匹配由 LLM 在后续步骤判断。"),
+        "note": ("关键词通道：LLM 双语改写多路搜索 + LLM 重排"
+                 if args.llm_expand else
+                 "原始意图直搜。"),
     }
 
     if args.json:

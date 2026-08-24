@@ -386,6 +386,55 @@ class RepoFetcher:
         return pickle.loads(path.read_bytes())
 
 
+def sync_stars(client: GitHubClient, conn, min_stars: int = 2000,
+               star_max: int = DEFAULT_STAR_MAX) -> int:
+    """
+    同步高星仓库的 star 快照到 repos.stars（语义检索的排序先验）。
+
+    REST search 自适应区间：count ≤ 990 直接翻页收全；超限二分细化
+    （REST search 与 GraphQL 一样有单查询 1000 条硬上限）。
+    低于 min_stars 的仓库不拉取：其先验贡献 log10(1+<2000) < 0.33，
+    对混合排序影响微小，不值得多花一个量级的请求配额（REST search 限 30 次/分钟）。
+
+    返回收集到的仓库数。库中已删除/改名的仓库 UPDATE 不生效，属正常。
+    """
+    mapping: Dict[str, int] = {}
+    calls = 0
+
+    def _rest_search(q: str, **params) -> Dict[str, Any]:
+        nonlocal calls
+        time.sleep(2.1)          # REST search 限速 30 req/min
+        calls += 1
+        return client.rest("/search/repositories", {"q": q, **params})
+
+    def _collect_range(lo: int, hi: int) -> None:
+        q = f"is:public stars:{lo}..{hi} fork:false"
+        total = _rest_search(q, per_page="1").get("total_count", 0)
+        if total == 0:
+            return
+        if total > 990 and hi > lo:
+            mid = (lo + hi) // 2
+            _collect_range(lo, mid)
+            _collect_range(mid + 1, hi)
+            return
+        pages = min((total + 99) // 100, 10)
+        for p in range(1, pages + 1):
+            r = _rest_search(q, per_page="100", page=str(p), sort="stars")
+            for it in r.get("items", []):
+                mapping[it["full_name"]] = int(it.get("stargazers_count") or 0)
+
+    lo = min_stars
+    while lo <= star_max:
+        hi = min(lo * 2 - 1, star_max)      # 倍增窗口 [lo, 2lo)
+        _collect_range(lo, hi)
+        lo = hi + 1
+
+    from sqlite_store import upsert_stars
+    upsert_stars(conn, mapping)
+    print(f"[stars] 同步 {len(mapping)} 条 star 快照（{calls} 次 REST 调用）")
+    return len(mapping)
+
+
 def main():
     parser = argparse.ArgumentParser(description="全量抓取 GitHub 仓库元数据到本地 sqlite")
     parser.add_argument("--stars-min", type=int, default=DEFAULT_STAR_MIN)
@@ -395,6 +444,10 @@ def main():
     parser.add_argument("--workers", type=int, default=4, help="并发抓取线程数(默认4)")
     parser.add_argument("--update", action="store_true",
                         help="变化检测模式（对比embed_text, 文本变了才更新；默认只插新）")
+    parser.add_argument("--sync-stars", action="store_true",
+                        help="只同步高星仓库 star 快照到 repos.stars（排序先验），不抓元数据")
+    parser.add_argument("--sync-stars-min", type=int, default=2000,
+                        help="star 同步下限（默认 2000，低于此值对排序先验贡献可忽略）")
     args = parser.parse_args()
 
     client = GitHubClient()
@@ -403,6 +456,12 @@ def main():
         print(f"已认证用户: {who['viewer']['login']}")
     except GitHubError as e:
         sys.exit(f"gh 不可用: {e}")
+
+    if args.sync_stars:
+        conn = connect(args.db)
+        sync_stars(client, conn, min_stars=args.sync_stars_min,
+                   star_max=args.stars_max)
+        return
 
     fetcher = RepoFetcher(client, args.stars_min, args.stars_max, db_path=args.db,
                           update_mode=args.update)
