@@ -36,7 +36,9 @@ from sqlite_store import (
 
 DEFAULT_TOP_K = 50
 DEFAULT_MIN_STARS = 0
-DEFAULT_STAR_WEIGHT = 0.08   # 混合排序: 每 10 倍 star 抵扣 0.08 个语义距离单位
+DEFAULT_STAR_WEIGHT = 0.03   # 混合排序: 每 10 倍 star 抵扣 0.03 个语义距离单位
+                             # (λ 扫描实测: 0.03 使 alist/LitePan 同入全库前50;
+                             #  0.08 会放行 mega-list 挤掉真相关小项目)
 
 
 class SemanticError(RuntimeError):

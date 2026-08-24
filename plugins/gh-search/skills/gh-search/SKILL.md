@@ -182,7 +182,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py --backend local --db <v3库
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/incremental_update.py --since 7
 ```
 
-排序机制：`score = 语义距离 − 0.08·log10(1+stars快照)`——深窗口 k=4000 召回 +
+排序机制：`score = 语义距离 − 0.03·log10(1+stars快照)`——深窗口 k=4000 召回 +
 star 先验救回元数据稀疏的头部项目（alist 实测从全库第 1361 名升至第 1）；
 `--pure-semantic` 回退纯距离排序。
 

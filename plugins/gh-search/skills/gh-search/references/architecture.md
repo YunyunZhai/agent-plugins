@@ -22,7 +22,7 @@ sqlite-vec repo_vectors（1024 维，归一化）
 用户意图 ──本地 fp32 ONNX──▶ 查询向量
   → 深窗口 kNN（k=4000，vec0 上限）
   → fork/archived 硬过滤
-  → 混合排序：score = dist − 0.08·log10(1+stars快照)
+  → 混合排序：score = dist − 0.03·log10(1+stars快照)
   → 截断 top_k
   → 仅对 top_k 在线刷新实时 stars（展示用，失败回落快照值）
 ```
