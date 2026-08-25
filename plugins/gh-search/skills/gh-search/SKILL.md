@@ -203,6 +203,6 @@ ARK_API_KEY=<key> ARK_BASE_URL=<套餐端点> GH_SEARCH_EMBED_DIM=2048 \
 ```
 </details>
 
-- **README 双通道（预留）**：`repo_readme_vectors` 表已建，待 README 抓取管线落地后启用，检索时自动取双表最小距离
+- **README 双通道（已启用）**：`repo_readme_vectors` 已入库 30,378 条（stars≥2000 仓库全量，Kaggle T4 嵌入），检索时自动按 id 取双表最小距离，无需开关
 - **依赖**：本地后端需 `pip install sqlite-vec sentence-transformers onnxruntime`；方舟/Pinecone 各需对应 SDK 与密钥
 - 索引未构建时，SKILL 自动使用**通道1关键词**，不影响基本功能

@@ -1,6 +1,6 @@
 # gh-search 语义检索：当前实现方案
 
-> 更新于 2026-08-24。本文描述**当前生产实现**，历史方案与踩坑细节见
+> 更新于 2026-08-25。本文描述**当前生产实现**，历史方案与踩坑细节见
 > `embedding-engineering-notes.md`。
 
 ## 一图总览
@@ -8,7 +8,7 @@
 ```
 【建库（一次性/每周增量）】
 GitHub GraphQL ──fetch_repos.py──▶ sqlite repos 表
-                                   （embed_text / stars 快照 / readme_embed_text 预留）
+                                   （embed_text / stars 快照 / readme_embed_text）
         │
         ▼
 嵌入层（二选一）：
@@ -18,9 +18,14 @@ GitHub GraphQL ──fetch_repos.py──▶ sqlite repos 表
         ▼
 sqlite-vec repo_vectors（1024 维，归一化）
 
+README 双通道（2026-08-25 启用）：fetch_readmes.py 抓取清洗（stars≥2000，
+共 30,378 条）→ 同一 Kaggle T4 管线嵌入 → sqlite-vec repo_readme_vectors
+
 【查询（semantic_search.py --backend local）】
 用户意图 ──本地 fp32 ONNX──▶ 查询向量
   → 深窗口 kNN（k=4000，vec0 上限）
+  → README 双通道合并：与 repo_readme_vectors 的 kNN 按 id 取最小距离
+    （同模型同空间，距离可直接比较；表非空即自动启用，无需开关）
   → fork/archived 硬过滤
   → 混合排序：score = dist − 0.03·log10(1+stars快照)
   → 截断 top_k
@@ -72,13 +77,14 @@ python3 scripts/fetch_repos.py --sync-stars --db <v3库>
 # 增量补嵌新仓库（断点续传，自动跳过已有）
 python3 scripts/build_index.py --backend local --db <v3库>
 
-# 未来启用 README 双通道后：repo_readme_vectors 表已建，
+# README 双通道已启用（2026-08-25）：repo_readme_vectors 全量 30,378 条，
 # semantic_search 自动取双表最小距离，无需改动调用方式
 ```
 
 ## 已知限制与后续方向
 
-1. README 双通道未落地：属性型查询（"readme 中有性能对比"类）仍依赖描述质量；
+1. README 双通道覆盖有限（30,378/432,586 ≈ 7%，仅 stars≥2000 已抓到 README 的仓库）：
+   属性型查询（"readme 中有性能对比"类）对未覆盖仓库仍依赖描述质量；
    jcode 类项目靠 star 先验救回而非语义命中。
 2. 查询端模型加载有 ~5s 冷启动（fp32 ONNX），高频使用可加常驻进程。
 3. OpenList 在 bge-m3 下裸距离跌出前 4000（豆包小池曾排第 4），靠 star 先验兜底；
