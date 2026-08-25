@@ -63,9 +63,16 @@
 2. **数据集挂载路径**：新版为 `/kaggle/input/datasets/<user>/<slug>/`（多了 `datasets/` 段），
    且 `.gz` 文件被自动解压成 `.jsonl`。代码里不要硬编码路径，用 os.walk 按文件名前缀查找。
 3. **GPU 型号分配**：kernel-metadata.json 的 `machine_shape` 枚举值**无公开文档**，
-   无法识别的值会**静默回落到 P100**；而 Kaggle 预装 torch 仅支持 sm_70+，
-   P100 (sm_60) 直接不兼容报错。实测 `nvidiaTeslaT4`、`gpu_t4x2` 均回落 P100。
-   **唯一可靠方法：网页 Session options → Accelerator → GPU T4 x2**。
+   无法识别的值会**静默回落到通用 Gpu（=P100）**；而 Kaggle 预装 torch 仅支持 sm_70+，
+   P100 (sm_60) 直接不兼容报错 `CUDA error: no kernel image is available`。
+   **纯命令行指定 T4 的方法（2026-08-25 实测成功）**：
+   ```bash
+   kaggle kernels push -p <dir> --accelerator "NvidiaTeslaT4"
+   ```
+   - 合法 slug 的发现技巧：先在网页上手动配一次目标加速器，再 `kaggle kernels pull <kernel> -m`
+     读回服务端存储的原始字符串（T4 x2 = `NvidiaTeslaT4`）。
+   - 验证闭环：push 后立即 `pull -m` 检查 `machine_shape` 是否原样保留；
+     被"归一化"成 `Gpu` 说明值不被识别（如 `INVALID_TEST`、`gpu_t4x2` 均回落 P100）。
 4. 并发 GPU 会话上限 **2 个**（超出报 Maximum batch GPU session count）。
 5. kernel 日志只有跑完（或出错）后才能经 output 接口拉取，运行中拿不到。
 
