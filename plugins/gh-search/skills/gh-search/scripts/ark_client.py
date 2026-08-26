@@ -100,10 +100,11 @@ class ArkEmbed:
                  model: Optional[str] = None):
         if os.environ.get("ARK_FORCE_IPV4", "1") != "0":
             _force_ipv4()
-        self.api_key = api_key or os.environ.get("ARK_API_KEY", "")
+        self.api_key = api_key or os.environ.get("ARK_API_KEY", "").split(",")[0].strip()
         self.base_url = (base_url or os.environ.get("ARK_BASE_URL", "")
                          or "https://ark.cn-beijing.volces.com/api/plan/v3").rstrip("/")
         self.model = model or os.environ.get("ARK_EMBED_MODEL", "doubao-embedding-vision")
+        self._key_idx = 0  # 用于多 key 轮换追踪
         if not self.api_key:
             raise ArkError("未设置 ARK_API_KEY 环境变量")
 
@@ -121,8 +122,13 @@ class ArkEmbed:
                     r = self._post_raw("/embeddings", req_body)
                     break
                 except ArkError as e:
-                    transient = "429" in str(e) or "503" in str(e) or "timeout" in str(e).lower()
+                    is_429 = "429" in str(e)
+                    transient = is_429 or "503" in str(e) or "timeout" in str(e).lower()
                     if not transient or attempt == 5:
+                        if is_429 and attempt == 5:
+                            # 429 重试耗尽，抛 QuotaExhausted 触发 key 轮换
+                            from build_index import QuotaExhausted
+                            raise QuotaExhausted(f"方舟 429 配额耗尽: {e}")
                         raise
                     if trace:
                         print(f"[ark] chunk{i}: attempt{attempt} err={str(e)[:60]} wait{wait:.0f}s",

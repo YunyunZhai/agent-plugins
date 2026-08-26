@@ -3,14 +3,17 @@
 为本地仓库元数据生成嵌入向量并写入 sqlite-vec（语义索引 Step 2）。
 
 读取 fetch_repos.py 落库的 `repos` 元数据表，把每条构造为嵌入文本，
-调用 Pinecone integrated inference 生成向量（llama-text-embed-v2, 1024 维），
-写入本地 sqlite-vec 的 `repo_vectors` 虚拟表 + `embed_status` 记录表。
+生成向量并写入本地 sqlite-vec 的 `repo_vectors` 虚拟表 + `embed_status` 记录表。
+
+支持三种嵌入后端:
+    - local: 本地 bge-m3 ONNX（fp32, 1024维, 当前生产路径）
+    - pinecone: Pinecone integrated inference（llama-text-embed-v2, 1024维）
+    - ark: 方舟 doubao-embedding-vision（2048维）
 
 设计要点:
     - 断点续传: 已嵌入的仓库(id 在 repo_vectors)自动跳过, 支持中断后重跑
-    - 批量嵌入: 每批 EMBED_BATCH 条 (Pinecone 单请求上限, 实测 96 兼容)
+    - 批量嵌入: 每批 EMBED_BATCH 条
     - 文本构造: "Repo: {name}. Description: {desc}. Topics: {topic1,topic2}"
-    - 嵌入成本: 按 token 计费(约 $0.08/M token), 本脚本打印累计 token 便于监控
 
 用法:
     python3 build_index.py                          # 嵌入全部未嵌入仓库
@@ -119,14 +122,23 @@ def build_index(db_path: Optional[str] = None, limit: int = DEFAULT_LIMIT,
     conn = connect(db_path)
 
     _ark = None
+    _ark_keys: List[str] = []
     _keys: List[str] = []
     pc = None
     if backend == "ark":
-        from ark_client import ArkEmbed
-        try:
-            _ark = ArkEmbed()
-        except Exception as e:  # noqa: BLE001
-            raise EmbedError(str(e))
+        # 多个嵌入账号（逗号分隔）自动轮换：一个撞 429 配额后切下一个继续
+        _ark_keys = [
+            k.strip() for k in
+            os.environ.get("ARK_API_KEY", "").split(",") if k.strip()
+        ]
+        if not _ark_keys:
+            raise EmbedError("未设置 ARK_API_KEY 环境变量（多个密钥用逗号分隔）")
+        if not dry_run:
+            from ark_client import ArkEmbed
+            try:
+                _ark = ArkEmbed(api_key=_ark_keys[0])
+            except Exception as e:  # noqa: BLE001
+                raise EmbedError(str(e))
     elif backend == "local":
         if not dry_run:
             _get_local_model()   # 提前加载，失败即报
@@ -179,7 +191,7 @@ def build_index(db_path: Optional[str] = None, limit: int = DEFAULT_LIMIT,
             row = conn.execute("SELECT embed_text FROM repos WHERE id=?", (i,)).fetchone()
             texts.append(row["embed_text"] if row else "")
 
-        # 嵌入这一批；配额耗尽时轮换下一个账号（仅 pinecone）；
+        # 嵌入这一批；配额耗尽时轮换下一个账号；
         # 偶发网关错误(504/超时等)指数退避重试, 避免长跑任务被单次抖动打断
         # （ark 后端在 ArkEmbed 内部已做 429/瞬断重试限速）
         vectors = None
@@ -199,16 +211,28 @@ def build_index(db_path: Optional[str] = None, limit: int = DEFAULT_LIMIT,
                 else:
                     vectors = embed_batch(pc, model, texts)
             except QuotaExhausted:
-                key_idx = getattr(pc, "_embed_key_idx", 0)
-                next_idx = key_idx + 1
-                if next_idx >= len(_keys):
-                    print(f"\n[quota] 全部 {len(_keys)} 个嵌入账号当月配额均耗尽, 停止。"
-                          f"已嵌 {done}/{total} 条, 剩余部分断点续传: "
-                          f"重设 PINECONE_EMBED_KEY 后重跑即可。")
-                    break
-                print(f"  [quota] 嵌入账号{key_idx} 配额耗尽, 切换到账号{next_idx}...")
-                pc = Pinecone(api_key=_keys[next_idx])
-                pc._embed_key_idx = next_idx
+                if backend == "ark":
+                    key_idx = getattr(_ark, "_key_idx", 0)
+                    next_idx = key_idx + 1
+                    if next_idx >= len(_ark_keys):
+                        print(f"\n[quota] 全部 {len(_ark_keys)} 个方舟账号当月配额均耗尽, 停止。"
+                              f"已嵌 {done}/{total} 条, 剩余部分断点续传: "
+                              f"重设 ARK_API_KEY 后重跑即可。")
+                        break
+                    print(f"  [quota] 方舟账号{key_idx} 配额耗尽, 切换到账号{next_idx}...")
+                    _ark = ArkEmbed(api_key=_ark_keys[next_idx])
+                    _ark._key_idx = next_idx
+                else:
+                    key_idx = getattr(pc, "_embed_key_idx", 0)
+                    next_idx = key_idx + 1
+                    if next_idx >= len(_keys):
+                        print(f"\n[quota] 全部 {len(_keys)} 个嵌入账号当月配额均耗尽, 停止。"
+                              f"已嵌 {done}/{total} 条, 剩余部分断点续传: "
+                              f"重设 PINECONE_EMBED_KEY 后重跑即可。")
+                        break
+                    print(f"  [quota] 嵌入账号{key_idx} 配额耗尽, 切换到账号{next_idx}...")
+                    pc = Pinecone(api_key=_keys[next_idx])
+                    pc._embed_key_idx = next_idx
             except EmbedError as e:
                 attempts += 1
                 if attempts >= 4:
