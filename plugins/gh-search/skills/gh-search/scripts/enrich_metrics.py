@@ -2,24 +2,21 @@
 """
 第 3 步：高阶成熟度指标过滤（仅对第 2 步的小集合调用，不做全量查询）。
 
-用 GraphQL 批量获取这批仓库的成熟度指标：
+2026-08 优化：单次 GraphQL 批量查询拿回全部指标，不再逐仓库调 REST：
     - 30 天 commit 数：defaultBranchRef.target.history(since: <30天前>).totalCount
     - 合并 PR 数：pullRequests(states: MERGED).totalCount
-用 REST /contributors 并行获取独立贡献者总数（含匿名）。
-
-贡献者 <GraphQL 采样低估问题>：GraphQL history 单次最多返回 100 条 commit，
-对年轻高产仓库（如 jcode，最近 100 条全出自同一作者）会严重低估贡献者数，
-故改用 REST 精确计数。REST 调用并发执行以控制耗时。
+    - 默认分支名
+（独立贡献者数已移除：REST /contributors 是此前的主要耗时来源，
+ 且其防玩具项目的作用可由 star 阈值 + 活跃度条件替代。）
 
 过滤条件（可配置，默认）：
-    - 独立贡献者 >= min_contributors（默认 8，过滤单人维护项目）
     - 活跃度双条件（满足其一即保留，避免误杀稳定低变更成熟项目）：
         近 30 天 commit >= min_commits_30d（默认 3）
         OR 最后推送在 6 个月内（稳定项目改动少也放行）
 
 用法:
     python3 enrich_metrics.py --input candidates.json
-    python3 enrich_metrics.py --input candidates.json --min-contributors 5 --min-commits-30d 1
+    python3 enrich_metrics.py --input candidates.json --min-commits-30d 1
     python3 enrich_metrics.py --repos "owner/name,owner/name2"   # 直接指定，便于调试
 
 输入标准: 前一步 search_repos.py 输出的 JSON（含 candidates_list）
@@ -29,17 +26,15 @@
 import argparse
 import json
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from github_client import GitHubClient
 
-DEFAULT_MIN_CONTRIBUTORS = 8
 DEFAULT_MIN_COMMITS_30D = 3
 DEFAULT_STALE_DAYS = 180
-BATCH_SIZE = 20           # 每批仓库数（GraphQL 别名，避免查询过大）
-CONTRIB_CONCURRENCY = 8   # 贡献者 REST 调用并发数
+BATCH_SIZE = 100          # 单次 GraphQL 别名批大小；每仓库约 4 个节点，
+                          # 100 仓库 ≈ 400 节点 << GitHub 5000 复杂度上限
 
 
 def _env_now() -> datetime:
@@ -87,90 +82,58 @@ def _extract_metrics(alias: str, data: Dict[str, Any]) -> Optional[Dict[str, Any
     }
 
 
-def _fetch_contributors(
+def _query_batch(
     client: GitHubClient,
-    full_name: str,
-    max_pages: int = 3,
-) -> int:
-    """用 REST /contributors 获取独立贡献者总数（含匿名，分页去重）。
-
-    比 GraphQL commit 采样更准确：对年轻高产仓库（如 jcode，最近 100 条
-    commit 全出自同一作者）Sample 会严重低估，而 REST 返回真实贡献者数。
-    仅对 Step3 小集合（20-60 条）调用，成本可控。
-    """
-    seen = set()
-    anon_idx = 0
-    for page in range(1, max_pages + 1):
-        data = None
-        for attempt in range(3):  # 轻量重试，容忍瞬时网络抖动
+    batch: List[Dict[str, Any]],
+    since30: str,
+) -> List[Dict[str, Any]]:
+    """对一批仓库执行单次 GraphQL 查询；失败时逐个重试并跳过不存在的仓库。"""
+    fragments = []
+    aliases = []
+    for j, r in enumerate(batch):
+        alias = f"r{j}"
+        owner, name = _split_owner_name(r["full_name"])
+        aliases.append(alias)
+        fragments.append(_build_metrics_query(alias, owner, name, since30))
+    gql = "query { " + " ".join(fragments) + " }"
+    try:
+        data = client.graphql(gql)
+    except Exception:  # noqa: BLE001
+        # 批量失败 → 逐个重试，跳过不存在/无权限的仓库
+        results = []
+        for r in batch:
+            owner, name = _split_owner_name(r["full_name"])
+            single = "query { " + _build_metrics_query("r0", owner, name, since30) + " }"
             try:
-                data = client.rest(
-                    f"/repos/{full_name}/contributors?per_page=100&anon=1&page={page}"
-                )
-                break
+                single_data = client.graphql(single)
             except Exception:  # noqa: BLE001
-                if attempt == 2:
-                    break
-        if not isinstance(data, list) or not data:
-            break
-        for c in data:
-            # 独立贡献者：named 用 login 去重；匿名（login 为 null）每条记录
-            # 视为一个独立贡献者（GitHub 匿名贡献者无稳定 ID，一条即一人）。
-            login = c.get("login")
-            if login:
-                seen.add(("login", login))
-            else:
-                anon_idx += 1
-                seen.add(("anon", anon_idx))
-        if len(data) < 100:
-            break
-    return len(seen)
+                print(f"  跳过 {r['full_name']}（不存在或无权限）", file=sys.stderr)
+                continue
+            m = _extract_metrics("r0", single_data)
+            if m:
+                r.update(m)
+                results.append(r)
+        return results
+    results = []
+    for alias, r in zip(aliases, batch):
+        m = _extract_metrics(alias, data)
+        if m:
+            r.update(m)
+            results.append(r)
+    return results
 
 
 def enrich(client: GitHubClient, repos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """批量拉取指标并合并到候选记录。
-
-    GraphQL 指标（commit/PR/分支）按批查询；贡献者 REST 调用并发执行，
-    避免逐仓库串行拖慢整体耗时。
-    """
+    """批量拉取指标并合并到候选记录（每 100 条一次 GraphQL 调用）。"""
     since30 = _date_30d_ago()
-    contrib_map: Dict[str, int] = {}
-
-    # 并发拉取所有仓库的贡献者数
-    def _contrib(full_name: str) -> tuple[str, int]:
-        return full_name, _fetch_contributors(client, full_name)
-
-    with ThreadPoolExecutor(max_workers=CONTRIB_CONCURRENCY) as pool:
-        futures = [pool.submit(_contrib, r["full_name"]) for r in repos]
-        for fut in as_completed(futures):
-            try:
-                name, cnt = fut.result()
-                contrib_map[name] = cnt
-            except Exception as e:  # noqa: BLE001
-                print(f"⚠️ 贡献者查询失败：{e}", file=sys.stderr)
-
     enriched: List[Dict[str, Any]] = []
+    batches = 0
     for i in range(0, len(repos), BATCH_SIZE):
         batch = repos[i:i + BATCH_SIZE]
-        fragments = []
-        aliases = []
-        for j, r in enumerate(batch):
-            alias = f"r{j}"
-            owner, name = _split_owner_name(r["full_name"])
-            aliases.append(alias)
-            fragments.append(_build_metrics_query(alias, owner, name, since30))
-        gql = "query { " + " ".join(fragments) + " }"
-        try:
-            data = client.graphql(gql)
-        except Exception as e:  # noqa: BLE001
-            print(f"⚠️ 批量指标查询失败（跳过 {len(batch)} 条）：{e}", file=sys.stderr)
-            continue
-        for alias, r in zip(aliases, batch):
-            m = _extract_metrics(alias, data)
-            if m:
-                r["contributors"] = contrib_map.get(r["full_name"], 0)
-                r.update(m)
-                enriched.append(r)
+        enriched.extend(_query_batch(client, batch, since30))
+        batches += 1
+    print(f"[gh] GraphQL 网络调用 {batches} 次，覆盖 {len(enriched)}/{len(repos)} 条",
+          file=sys.stderr)
     return enriched
 
 
@@ -186,14 +149,11 @@ def _is_stale(pushed_at: Optional[str]) -> bool:
 
 def step3_filter(
     enriched: List[Dict[str, Any]],
-    min_contributors: int,
     min_commits_30d: int,
 ) -> List[Dict[str, Any]]:
-    """Step3 过滤：贡献者阈值 + 活跃度双条件。"""
+    """Step3 过滤：活跃度双条件（防单人玩具项目交由 star 阈值与上层初筛把关）。"""
     kept = []
     for r in enriched:
-        if r.get("contributors", 0) < min_contributors:
-            continue
         # 活跃度双条件，满足其一即保留
         fresh = r.get("commits_30d", 0) >= min_commits_30d
         active = not _is_stale(r.get("pushed_at"))
@@ -218,8 +178,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="第3步：成熟度指标过滤")
     parser.add_argument("--input", default=None, help="前一步 search_repos.py 输出的 JSON")
     parser.add_argument("--repos", default=None, help="逗号分隔的仓库名，便于调试")
-    parser.add_argument("--min-contributors", type=int, default=DEFAULT_MIN_CONTRIBUTORS,
-                        help=f"独立贡献者最低阈值（默认 {DEFAULT_MIN_CONTRIBUTORS}）")
     parser.add_argument("--min-commits-30d", type=int, default=DEFAULT_MIN_COMMITS_30D,
                         help=f"近30天 commit 阈值（默认 {DEFAULT_MIN_COMMITS_30D}）")
     parser.add_argument("--json", action="store_true", help="仅输出 JSON")
@@ -232,13 +190,12 @@ def main() -> None:
 
     client = GitHubClient()
     enriched = enrich(client, repos)
-    kept = step3_filter(enriched, args.min_contributors, args.min_commits_30d)
+    kept = step3_filter(enriched, args.min_commits_30d)
 
     result = {
         "input_count": len(repos),
         "enriched_count": len(enriched),
         "output_count": len(kept),
-        "min_contributors": args.min_contributors,
         "min_commits_30d": args.min_commits_30d,
         "results": kept,
     }
@@ -248,7 +205,7 @@ def main() -> None:
         print(f"Step3: 输入 {len(repos)} 条 → 富化 {len(enriched)} 条 → 保留 {len(kept)} 条")
         for r in kept:
             print(f"  {r['full_name']} ⭐{r.get('stars')} "
-                  f"贡献者{r.get('contributors')} commits30d={r.get('commits_30d')} "
+                  f"commits30d={r.get('commits_30d')} "
                   f"mergedPRs={r.get('merged_prs')}")
 
 

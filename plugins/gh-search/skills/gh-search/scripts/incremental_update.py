@@ -112,7 +112,6 @@ class IncrementalUpdate:
         week 模式: 默认只嵌未嵌入的（build_index 默认）。
         month 模式: 强制重嵌 need_ids（文本变了的仓库）。
         """
-        from build_index import build_index
         if self.mode == "month" and need_ids:
             return build_index(self.db_path, limit=0, dry_run=dry_run, force_ids=need_ids)
         return build_index(self.db_path, limit=0, dry_run=dry_run)

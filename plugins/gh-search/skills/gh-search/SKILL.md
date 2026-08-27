@@ -13,7 +13,7 @@ description: |
 开始前，检查 `gh` CLI 是否可用并已认证：
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/github_client.py
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/github_client.py
 ```
 
 - 输出"已认证用户: <name>" → 继续
@@ -46,28 +46,38 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/github_client.py
 
 ### Step 1 — 原始召回
 
-调用脚本，传入用户意图、语言（如能推断）、star 阈值：
+**意图转写（你负责）**：脚本不做任何 LLM 调用。先把用户意图改写成 **3~5 组关键词**再传入：
+- 每组 ≤4 个词、表达一个**具体**语义切面；英文组为主（GitHub 检索英文友好），中文意图补 1~2 组中文词
+- 用可重复的 `--group` 传多组；`--query` 仍传原始意图（用于结果元数据）
 
-```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/search_repos.py \
-  --query "<用户检索意图>" \
-  --language <language> \
-  --min-stars 200 \
-  --max-recalls 400 \
-  --json
-```
+**⚠ 关键词组必须具体，禁止万金油词组**——「open source solution」「self hosted tool」「free software」「developer tools」「machine learning」「web application」等几乎匹配所有开源项目，会引入大量噪音。每组词必须能区分「这个项目是 X」和「这个项目不是 X」。
+
+**反面示例（禁止）**：
+- `open source solution` — 几乎所有开源项目都匹配
+- `self hosted tool` — 自托管工具 ≠ 网盘聚合
+- `free software aggregator` — "free"+"aggregator" 太宽
+
+**正面示例（好的转写）**：
+- 意图「编程智能体开源项目，低延迟高性能」→
+  `coding agent terminal rust`、`llm code generation fast`、`编程智能体 低延迟`、`高性能 代码生成`
+- 意图「免费聚合网盘开源项目」→
+  `multi cloud storage aggregator`、`self hosted file sync golang`、`rclone alternative multi drive`、`聚合网盘 多端同步`
+
+**脚本内置行为**（无需干预；stderr 的 `[variant]` 行逐组输出召回统计）：
+- 每组先按 **AND**（全部词命中，精准小池）搜索；命中 <20 条自动同词降级 **OR** 补池
+- 多组结果合并去重后输出；**无相关性排序**（初筛与排序是你的职责，见文末）
 
 **说明**：
 - 查询串使用 `fork:false`（**不是** `not:fork`，后者在 GraphQL 会静默返回 0 结果）
 - 活跃窗口动态计算：`pushed:>=<6个月前>`，过滤僵尸仓库
-- 召回 200-400 条，含 `nameWithOwner, description, topics, stars, forks, pushedAt, createdAt, license`
+- 输出含 `nameWithOwner, description, topics, stars, forks, pushedAt, createdAt, license`
 
-**Step1 输出**：原始召回列表（存在大量语义不匹配、description 为空的项目属正常）。
+**Step1 输出**：无序候选池（存在大量语义不匹配、description 为空的项目属正常）。
 
 **通道2 语义召回**（若选定）：
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/semantic_search.py \
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/semantic_search.py \
   --query "<用户检索意图>" \
   --top-k 50 \
   --min-stars 100 \
@@ -77,41 +87,40 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/semantic_search.py \
 **说明**：
 - 语义通道对 `name/description/topics` 做向量匹配，能召回"描述不含关键词但语义相关"的项目
 - 输出 `candidates_list` 结构与关键词通道一致，便于通道3 union
-- 按语义距离升序（近者优先）；star 仅作 `--min-stars` 过滤，不作主排序（避免 star 淹没语义差异）
+- 按混合分排序（语义距离 − 0.03·log10(1+stars快照)），兼顾语义相关性与项目成熟度；`--pure-semantic` 可回退纯距离排序
 
-### Step 2 — 内存粗筛（元数据层，不读 README）
+### Step 2 — 语义初筛（subagent 执行，保护主会话上下文）
 
 `search_repos.py` 已自动完成硬过滤（丢弃 fork/archived/超6个月未推送），并**保留 description 为空的项目**。
 
-**你的任务**：对返回的候选做语义初筛——
-- 优先看 topics 关键词是否匹配用户领域
-- 对 description 非空者，轻量判断描述是否匹配用户意图
-- **description 为空的项目直接保留**，不丢弃（很多正经项目不填描述）
+候选池可能有数百条，直读会占满主会话上下文——用 **Task 子代理**执行初筛，大列表不回流主会话：
 
-**Step2 输出**：裁剪到约 80-150 条候选。
+- **子代理 prompt 必须自包含**（它没有会话历史）：用户意图原文、Step1 的关键词组、step1.json 路径、输出路径
+- **任务**：读 step1.json，按意图裁剪——优先看 topics 是否匹配用户领域；description 非空者轻量判断语义相关性；**description 为空直接保留**
+- **输出契约**：裁剪集写成 step2.json（`candidates_list` 结构不变），只向主会话返回一行统计（如「283→96 条，剔除爬虫/CTF/教程类噪音」）
+
+**Step2 输出**：约 80-150 条候选。
 
 ### Step 3 — 高阶成熟度指标过滤（仅对小集合调用）
 
 对 Step 2 的小集合调用富化脚本，批量获取成熟度指标并过滤：
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/enrich_metrics.py \
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/enrich_metrics.py \
   --input <step2.json> \
-  --min-contributors 8 \
   --min-commits-30d 3 \
   --json
 ```
 
-**获取指标**（GraphQL 批量 + REST 贡献者）：
-- 独立贡献者总数（REST `/contributors`，含匿名）
+**获取指标**（单次 GraphQL 批量查询拿回全部；≤100 条仅 1 次网络调用）：
 - 近 30 天 commit 数（`history(since:)` — 注意不是 `until`）
 - 累计合并 PR 数（`pullRequests(states: MERGED)`）
 
-**过滤条件**（可配置，默认）：
-1. 独立贡献者 ≥ 8（过滤单人维护的玩具项目）
-2. 活跃度双条件（满足其一即保留，避免误杀稳定低变更的成熟项目）：
-   - 近 30 天 commit ≥ 3；**或**
-   - 最后推送在 6 个月内
+**过滤条件**（可配置）：活跃度双条件（满足其一即保留，避免误杀稳定低变更的成熟项目）：
+- 近 30 天 commit ≥ 3；**或**
+- 最后推送在 6 个月内
+
+单人维护的玩具项目由 star 阈值与最终排序把关。
 
 **Step3 输出**：20-60 条高质量候选。到此为止**没有拉取任何 README**。
 
@@ -120,7 +129,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/enrich_metrics.py \
 仅当用户开启【深度语义匹配】开关时执行：
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_readme.py \
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/fetch_readme.py \
   --input <step3.json> \
   --max-chars 2000 \
   --json
@@ -133,14 +142,18 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_readme.py \
 ### LLM 输入
 
 用户原始查询意图 + Step 3（+Step 4 可选 README 片段）的候选项目数组。每条项目携带：
-`repo 名称、star、fork、topics、description、createdAt、pushedAt、contributors、近30天commit、合并PR、【可选 README 片段】`
+`repo 名称、star、fork、topics、description、createdAt、pushedAt、近30天commit、合并PR、【可选 README 片段】`
 
-### 最终输出（给用户）
+### 最终排序与输出（subagent 执行，主会话只收 Top-N 文案）
 
-1. **筛选过滤**：剔除语义不匹配、玩具 Demo 项目；区分【成熟高置信项目】/【潜力新项目】两组
-2. **每个项目**：简短能力说明、成熟度风险提示（单人维护、版本状态等）
-3. **按匹配度 & 社区权威度排序**
-4. **对比摘要**（如资源、适用场景）
+排序数据体量大（富化指标 + 可选 README 片段），同样派 **Task 子代理**完成：
+
+- **prompt 自包含**：用户意图原文、step3.json（及深度模式的 readme 增强文件）路径
+- **任务**：
+  1. 剔除语义不匹配、玩具 Demo 项目；区分【成熟高置信项目】/【潜力新项目】两组
+  2. 每个项目一句话能力说明 + 成熟度风险提示（单人维护、版本状态等）
+  3. 按匹配度 & 社区权威度排序；给出对比摘要（如资源、适用场景）
+- **输出契约**：完整排序写入 final.json 备查；向主会话只返回 Top-10 推荐文案（直接展示给用户）
 
 ## 关键约束（务必遵守）
 
@@ -148,13 +161,16 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_readme.py \
 2. description 大量为空，**不能作为丢弃条件**。
 3. 不把 commit>X 作为硬必选条件，保护改动少的稳定成熟库。
 4. README 作为可选增强，默认关闭，降低 token、网络开销。
+5. 脚本保持确定性 CLI、零 LLM 调用：意图转写（Step1 前）、语义初筛（Step2）、
+   相关性排序（最终输出）均由大模型完成；其中 Step2 与最终排序通过 subagent
+   执行，候选大列表不进入主会话上下文。
 
 ## 错误处理
 
 - `gh` 未认证 → 引导 `gh auth login`，不崩溃
 - 单仓库无权限/不存在 → 跳过该仓库，继续处理其余
 - 网络抖动 → 脚本内置重试；仍失败则提示用户重试
-- 语义通道需 `PINECONE_API_KEY` + 本地索引；缺失时报错并回退关键词通道
+- 语义通道需本地索引（bge-m3, `--backend local`）；索引缺失时自动回退关键词通道
 - 详见 `references/error-handling.md`
 
 ## 索引维护（语义通道的数据源）
@@ -167,19 +183,19 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_readme.py \
 ```bash
 # 查询（生产姿势；后端必须与库的模型一致）
 GH_SEARCH_BACKEND=local GH_SEARCH_DB=<插件data目录>/gh_search_index_v3.db \
-  python3 ${CLAUDE_PLUGIN_ROOT}/scripts/semantic_search.py --query "..." --top-k 15
+  python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/semantic_search.py --query "..." --top-k 15
 
 # 星数快照刷新（混合排序的先验数据源，覆盖 ≥2000★，每周一次，约 40 分钟）
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/fetch_repos.py --sync-stars --db <v3库>
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/fetch_repos.py --sync-stars --db <v3库>
 
 # 增量补嵌新仓库（断点续传，自动跳过已有）
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py --backend local --db <v3库>
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/build_index.py --backend local --db <v3库>
 
 # 全量重建走 Kaggle GPU（60 条/s）：导出→T4 嵌入→回导，
 # 见 references/colab_gpu_embedding.md 与 scripts/import_gpu_vectors.py
 
 # 每周增量抓取近 7 天新活跃仓库
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/incremental_update.py --since 7
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/incremental_update.py --mode week --since 7 --db <v3库>
 ```
 
 排序机制：`score = 语义距离 − 0.03·log10(1+stars快照)`——深窗口 k=4000 召回 +
@@ -196,10 +212,10 @@ star 先验救回元数据稀疏的头部项目（alist 实测从全库第 1361 
 
 ```bash
 # Pinecone 后端（多账号轮换：PINECONE_EMBED_KEY=key1,key2）
-PINECONE_API_KEY=<key> python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py
+PINECONE_API_KEY=<key> python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/build_index.py
 # 方舟后端（--shard i:n 多 key 分片并行；注意 plan/coding 端点不同）
 ARK_API_KEY=<key> ARK_BASE_URL=<套餐端点> GH_SEARCH_EMBED_DIM=2048 \
-  python3 ${CLAUDE_PLUGIN_ROOT}/scripts/build_index.py --backend ark --shard 0:3
+  python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/build_index.py --backend ark --shard 0:3
 ```
 </details>
 

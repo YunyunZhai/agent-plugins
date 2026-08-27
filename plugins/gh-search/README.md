@@ -22,7 +22,7 @@ GitHub 智能开源项目搜索插件。根据用户的语义检索意图（如"
 |------|------|--------|----------|------|
 | Step 1 | GraphQL 原始召回 | GitHub GraphQL Search | 见下方 [Step 1 查询条件] | 200-400 条 |
 | Step 2 | 内存粗筛（元数据层，不读 README） | description + topics | 见下方 [Step 2 硬过滤] | 80-150 条 |
-| Step 3 | 高阶成熟度指标过滤 | GraphQL 批量 + REST 贡献者 | 见下方 [Step 3 过滤] | 20-60 条 |
+| Step 3 | 高阶成熟度指标过滤 | 单次 GraphQL 批量查询 | 见下方 [Step 3 过滤] | 20-60 条 |
 | Step 4 | 可选深度增强（默认关闭） | README 截断片段 | 拼接开头 1200 字 + 末尾 300 字（共 ≤2000） | 20-60 条 + 片段 |
 
 ### Step 1 查询条件（构建到 GraphQL search query 中）
@@ -47,11 +47,10 @@ is:public fork:false archived:false stars:>200 pushed:>=<最近180天>  [languag
 
 ### Step 3 过滤（成熟度指标，默认阈值）
 
-每条候选拉取 3 个指标：**贡献者数**（REST 精确计数，含匿名）、**近 30 天 commit 数**（`history(since:)`）、**合并 PR 总数**。然后过滤：
+每条候选拉取 2 个指标：**近 30 天 commit 数**（`history(since:)`）、**合并 PR 总数**——单次 GraphQL 批量查询拿回全部（≤100 条仅 1 次网络调用）。然后过滤：
 
 | 条件 | 默认值 | 说明 |
 |------|--------|------|
-| 独立贡献者 ≥ `--min-contributors` | 8 | 过滤单人维护项目 |
 | 活跃度双条件（满足其一即保留） | — | 避免误杀稳定低变更的成熟项目 |
 | ├─ 近 30 天 commit ≥ `--min-commits-30d` | 3 | 持续活跃 |
 | └─ 或最后一次推送在 180 天内 | — | 改动少但未过时的稳定项目 |
@@ -65,7 +64,7 @@ is:public fork:false archived:false stars:>200 pushed:>=<最近180天>  [languag
 **关键设计**：
 - 只用 `fork:false`，不用 `not:fork`（GraphQL 陷阱）
 - description 为空**不丢弃**（很多正经项目不填描述）
-- 贡献者数用 REST 精确计数（含匿名），避免年轻高产仓库被低估
+- Step2 初筛与最终排序由 subagent 执行，候选大列表不占主会话上下文
 - 30 天 commit 用 `history(since:)`（非 `until`），否则会统计全部 commit
 - README 默认关闭，降低 token 与网络开销
 
@@ -94,15 +93,18 @@ gh auth login
 
 ```bash
 pip install --user sqlite-vec      # 本地向量库
-# Pinecone SDK 已含于 plugin-recommender 环境; 嵌入需 PINECONE_API_KEY
+pip install --user sentence-transformers  # local 后端（bge-m3）
+# local 后端不需要 Pinecone；仅 pinecone 后端需要 PINECONE_API_KEY
 ```
 
 ## 脚本
 
 ```bash
-# 通道1 关键词召回
+# 通道1 关键词召回（先转写成 3~5 组关键词，--group 可重复）
 python3 skills/gh-search/scripts/search_repos.py \
-  --query "网络安全 安全扫描" --language python --json
+  --query "网络安全 安全扫描" \
+  --group "security scanner" --group "vulnerability scan" --group "安全扫描" \
+  --language python --json
 
 # 通道2 语义召回（需已构建索引）
 python3 skills/gh-search/scripts/semantic_search.py \
@@ -123,24 +125,26 @@ python3 skills/gh-search/scripts/fetch_readme.py \
 # 首次全量抓取（stars:>100 约47万仓库, 后台数小时, 中断可 --resume）
 python3 skills/gh-search/scripts/fetch_repos.py --stars-min 100
 
-# 嵌入向量（Pinecone 托管嵌入, 按 token 计费, 断点续传）
-PINECONE_API_KEY=<key> python3 skills/gh-search/scripts/build_index.py
+# 嵌入向量（本地 bge-m3, 当前生产路径）
+python3 skills/gh-search/scripts/build_index.py --backend local --db plugins/gh-search/data/gh_search_index_v3.db
 
 # 每周增量：只插新仓库（近7天新活跃）
-PINECONE_API_KEY=<key> python3 skills/gh-search/scripts/incremental_update.py --mode week --since 7
+python3 skills/gh-search/scripts/incremental_update.py --mode week --since 7 \
+  --db plugins/gh-search/data/gh_search_index_v3.db
 
 # 每月增量：变化检测重嵌（抓近30天活跃, 只对描述/topics变了的重嵌）
-PINECONE_API_KEY=<key> python3 skills/gh-search/scripts/incremental_update.py --mode month --since 30
+python3 skills/gh-search/scripts/incremental_update.py --mode month --since 30 \
+  --db plugins/gh-search/data/gh_search_index_v3.db
 ```
 
-- 数据库：`plugins/gh-search/data/gh_search_index.db`（`GH_SEARCH_DB` 可覆盖）
-- 嵌入模型：`llama-text-embed-v2`（1024 维）
+- 数据库：`plugins/gh-search/data/gh_search_index_v3.db`（`GH_SEARCH_DB` 可覆盖）
+- 嵌入模型：`bge-m3` fp32 ONNX（1024 维，当前生产）；备选 `llama-text-embed-v2`（Pinecone 后端）
 - **索引只存语义字段**（name/desc/topics/lang），不存 stars 等动态字段；`semantic_search` 会在线拉取最新 stars 过滤
 
 ## 配置
 
 - **GitHub 认证**：复用 `gh` CLI 凭据（`~/.config/gh/hosts.yml`）
 - **深度模式**：每次会话由 AskUserQuestion 询问是否开启
-- **过滤阈值**：可通过脚本参数调整（`--min-stars`、`--min-contributors`、`--min-commits-30d` 等）
+- **过滤阈值**：可通过脚本参数调整（`--min-stars`、`--min-commits-30d` 等）
 - **超时**：`GH_SEARCH_TIMEOUT` 环境变量（秒，默认 60）
-- **嵌入**：`PINECONE_API_KEY`（必填）+ `PINECONE_MODEL`（可选，默认 `llama-text-embed-v2`）
+- **嵌入**：`--backend local`（默认生产路径，无需密钥）；`--backend pinecone` 需 `PINECONE_API_KEY`

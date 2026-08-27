@@ -19,12 +19,11 @@
     GH_SEARCH_DB  - 数据库文件路径（默认 <脚本目录>/../../data/gh_search_index.db）
 """
 
-import json
 import os
 import sqlite3
 import struct
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 try:
     import sqlite_vec
@@ -41,7 +40,7 @@ EMBED_DIM = int(os.environ.get("GH_SEARCH_EMBED_DIM", "1024"))
 # 默认数据库路径：插件 data 目录（plugins/gh-search/data/）
 # 脚本位于 plugins/gh-search/skills/gh-search/scripts/ → 上 4 层到 plugins/gh-search/
 _DEFAULT_DB = (
-    Path(__file__).resolve().parent.parent.parent.parent / "data" / "gh_search_index.db"
+    Path(__file__).resolve().parent.parent.parent.parent / "data" / "gh_search_index_v3.db"
 )
 DB_PATH = Path(os.environ.get("GH_SEARCH_DB", str(_DEFAULT_DB)))
 
@@ -52,7 +51,7 @@ class VectorSearchError(RuntimeError):
 
 # ══ 数据库连接与初始化 ═══════════════════════════════════════════════
 
-def connect(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Connection:
+def connect(db_path: Optional[str | Path] = None) -> sqlite3.Connection:
     """建立带 row_factory 的 sqlite 连接, 并加载 sqlite-vec 扩展。"""
     path = Path(db_path) if db_path else DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -157,14 +156,19 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 
 # ══ 元数据操作 ═════════════════════════════════════════════════════
 
+MAX_DESC_CHARS = 350           # GitHub 网页端描述字段硬性上限；超过此长度的为 API 绕过写入的垃圾内容，直接丢弃
+
 def build_embed_text(repo: Dict[str, Any]) -> str:
     """
     把仓库元数据构造成嵌入文本（语义索引的输入，同时作为变化检测依据）。
     只含语义相关字段：name/primary_language/description/topics。
+    description 超过 MAX_DESC_CHARS（GitHub 网页端硬限）视为垃圾内容，丢弃。
     """
     name = repo.get("id") or ""            # id 即 nameWithOwner (owner/name)
     lang = repo.get("primary_language") or ""
     desc = (repo.get("description") or "").strip()
+    if len(desc) > MAX_DESC_CHARS:
+        desc = ""                           # 超出 GitHub 网页端硬限，视为垃圾内容
     topics = repo.get("topics") or []
     if isinstance(topics, str):
         try:
@@ -252,12 +256,6 @@ def update_if_text_changed(conn: sqlite3.Connection, repo: Dict[str, Any]) -> bo
     return True
 
 
-def repo_exists(conn: sqlite3.Connection, repo_id: str) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM repos WHERE id=?", (repo_id,)
-    ).fetchone() is not None
-
-
 def get_repo(conn: sqlite3.Connection, repo_id: str) -> Optional[Dict[str, Any]]:
     row = conn.execute("SELECT * FROM repos WHERE id=?", (repo_id,)).fetchone()
     return dict(row) if row else None
@@ -279,14 +277,6 @@ def count_repos(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM repos").fetchone()[0]
 
 
-def get_embed_text(conn: sqlite3.Connection, repo_id: str) -> str:
-    """读取某仓库的 embed_text（供重嵌/比对用）。"""
-    row = conn.execute(
-        "SELECT embed_text FROM repos WHERE id=?", (repo_id,)
-    ).fetchone()
-    return row["embed_text"] if row else ""
-
-
 # ══ 向量操作（sqlite-vec）═══════════════════════════════════════════
 
 def _to_blob(values: List[float]) -> bytes:
@@ -304,12 +294,6 @@ def upsert_vec(conn: sqlite3.Connection, repo_id: str, embedding: List[float]) -
         "INSERT INTO repo_vectors (id, embedding) VALUES (?, ?)",
         (repo_id, _to_blob(embedding)),
     )
-
-
-def is_embedded(conn: sqlite3.Connection, repo_id: str) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM repo_vectors WHERE id=?", (repo_id,)
-    ).fetchone() is not None
 
 
 def count_vectors(conn: sqlite3.Connection) -> int:
@@ -362,6 +346,9 @@ def search_knn(
     """sqlite-vec kNN 检索，返回 [{id, distance}, ...] 按距离升序。
 
     table 可选 "repo_vectors"(元数据通道) 或 "repo_readme_vectors"(README 通道)。
+    返回的 distance 是余弦距离 (0=相同, 2=相反)。
+    sqlite-vec vec0 默认用 L2 距离，对归一化向量 L2² = 2*(1-cos_sim)，
+    因此 cos_dist = L2² / 2。
     """
     if len(query_vec) != EMBED_DIM:
         raise ValueError(f"查询向量维度 {len(query_vec)} != {EMBED_DIM}")
@@ -369,33 +356,14 @@ def search_knn(
         f"SELECT id, distance FROM {table} WHERE embedding MATCH ? AND k = ?",
         (_to_blob(query_vec), k),
     ).fetchall()
-    return [{"id": r["id"], "distance": r["distance"]} for r in rows]
+    return [{"id": r["id"], "distance": r["distance"] ** 2 / 2} for r in rows]
 
 
 def count_readme_vectors(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM repo_readme_vectors").fetchone()[0]
 
 
-def upsert_readme_vec(conn: sqlite3.Connection, repo_id: str,
-                      vec: List[float], readme_text: str) -> None:
-    """写入 README 通道向量 + 文本快照（变化检测/重嵌依据）。"""
-    if len(vec) != EMBED_DIM:
-        raise ValueError(f"嵌入维度 {len(vec)} != 期望 {EMBED_DIM}")
-    conn.execute(
-        "INSERT OR REPLACE INTO repo_readme_vectors(id, embedding) VALUES (?,?)",
-        (repo_id, _to_blob(vec)),
-    )
-    conn.execute(
-        "UPDATE repos SET readme_embed_text=? WHERE id=?", (readme_text, repo_id)
-    )
-
-
 # ══ 便捷入口 ═══════════════════════════════════════════════════════
-
-def open_store(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Connection:
-    """与 connect 等价，命名更贴近业务。"""
-    return connect(db_path)
-
 
 if __name__ == "__main__":
     # 自检: 建库 + 演示 kNN（内存库）

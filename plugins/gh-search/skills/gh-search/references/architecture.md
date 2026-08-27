@@ -40,7 +40,7 @@ README 双通道（2026-08-25 启用）：fetch_readmes.py 抓取清洗（stars�
 | 语料在 **Kaggle T4 上以 fp32** 批量产出 | 本地 CPU 仅 3.5 条/s（34h），GPU 60 条/s（2h）；免费额度每周 30h 绰绰有余 |
 | 查询端用 **fp32 ONNX**（非 int8） | 与 GPU fp32 语料数值同源（同文本向量余弦≈1.0）；int8 会引入 ~0.02 漂移，禁止混入在线链路 |
 | 深窗口 k=4000 | 元数据稀疏的头部项目裸距离排名可达 1300+（alist 实测），浅窗口直接漏掉；vec0 全库暴力扫描，深堆零额外成本 |
-| 混合排序 star 先验（λ=0.08） | 把"描述写得烂但实力强"的头部项目从千名外拉回前排（alist 1361→第1）；λ 取 0.08 使无关大热门不会压过真相关小项目 |
+| 混合排序 star 先验（λ=0.03） | 把"描述写得烂但实力强"的头部项目从千名外拉回前排（alist 1361→第1）；λ 取 0.08 会放行 mega-list 挤掉真相关小项目，实测 0.03 兼顾召回与精度 |
 | 打分用 **stars 快照**、仅 top_k 在线刷新 | 深窗口下对数千候选逐个在线拉 star 需要 130+ GraphQL 批次（数分钟/次查询），不可行；快照允许周级陈旧 |
 
 ## 文件清单
@@ -49,7 +49,7 @@ README 双通道（2026-08-25 启用）：fetch_readmes.py 抓取清洗（stars�
 |------|------|
 | `scripts/build_index.py` | 批量嵌入入口。`--backend local/ark/pinecone`，`--shard i:n` 多进程分片 |
 | `scripts/import_gpu_vectors.py` | Kaggle npz 回导 v3 库（校验维度/归一化/id 完整性，幂等 DELETE+INSERT） |
-| `scripts/semantic_search.py` | 查询入口。`--backend local` + `--star-weight 0.08`(默认) + `--dual-query`/`--pure-semantic` 开关 |
+| `scripts/semantic_search.py` | 查询入口。`--backend local` + `--star-weight 0.03`(默认) + `--dual-query`/`--pure-semantic` 开关 |
 | `scripts/fetch_repos.py` | 元数据抓取 + `--sync-stars` 星数快照同步（REST 自适应区间，30 req/min 限速内） |
 | `scripts/sqlite_store.py` | schema 与 vec0 封装。EMBED_DIM 由 `GH_SEARCH_EMBED_DIM` 控制（v3 用默认 1024） |
 | `scripts/ark_client.py` | 方舟 chat/embeddings 客户端（备用后端；强制 IPv4 绕 fake-ip 故障） |

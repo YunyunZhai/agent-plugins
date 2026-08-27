@@ -19,17 +19,23 @@
 
 import argparse
 import json
+import logging
 import math
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+log = logging.getLogger("semantic_search")
 
 sys.path.insert(0, str(Path(__file__).parent))
 from sqlite_store import (
     EMBED_DIM,
     EMBED_MODEL,
     connect,
+    count_readme_vectors,
+    count_vectors,
     get_repo,
     search_knn,
 )
@@ -141,14 +147,17 @@ def _fuse_knn(hit_lists: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     """多路 kNN 结果 RRF 融合：score = Σ 1/(60+rank)，距离取各路最小值。"""
     rrf: Dict[str, float] = {}
     best_dist: Dict[str, float] = {}
+    best_source: Dict[str, str] = {}
     for hits in hit_lists:
         for rank, h in enumerate(hits):
             rrf[h["id"]] = rrf.get(h["id"], 0.0) + 1.0 / (60 + rank + 1)
             d = h["distance"]
             if h["id"] not in best_dist or d < best_dist[h["id"]]:
                 best_dist[h["id"]] = d
+                best_source[h["id"]] = h.get("_source", "repo")
     ordered = sorted(rrf.items(), key=lambda kv: -kv[1])
-    return [{"id": rid, "distance": best_dist[rid], "_rrf": s} for rid, s in ordered]
+    return [{"id": rid, "distance": best_dist[rid], "_rrf": s,
+             "_source": best_source.get(rid, "repo")} for rid, s in ordered]
 
 
 def semantic_search(
@@ -168,8 +177,24 @@ def semantic_search(
     star_weight > 0 时按混合分排序（语义距离 − star 先验），并把 kNN 召回窗口
     放宽到 top_k×10（让头部项目有进入候选池的机会）；= 0 时回退纯距离排序。
     """
+    log.debug("=== semantic_search START ===")
+    log.debug("query: %s", query)
+    log.debug("params: top_k=%d min_stars=%d star_weight=%.3f exclude_fork=%s exclude_archived=%s backend=%s",
+              top_k, min_stars, star_weight, exclude_fork, exclude_archived, backend)
+
     conn = connect(db_path)
+    repo_count = count_vectors(conn)
+    readme_count = 0
+    try:
+        readme_count = count_readme_vectors(conn)
+    except Exception:
+        pass
+    log.debug("DB connected: %s  embed_model=%s  dim=%d", db_path or "(default)", EMBED_MODEL, EMBED_DIM)
+    log.debug("DB stats: repo_vectors=%d  repo_readme_vectors=%d", repo_count, readme_count)
+
+    t0 = time.monotonic()
     qvec = embed_query(query, model, backend)
+    log.debug("query embed done in %.2fs, dim=%d", time.monotonic() - t0, len(qvec))
     if len(qvec) != EMBED_DIM:
         raise SemanticError(f"query 向量维度 {len(qvec)} != {EMBED_DIM}")
 
@@ -177,9 +202,17 @@ def semantic_search(
     # 元数据稀疏的头部项目（alist 实测全库第 ~1400 名）必须先进池子才有的救。
     # sqlite-vec 是全库暴力扫描，深堆与浅堆成本几乎相同。
     knn_k = 4000 if star_weight > 0 else max(top_k * 2, 20)
+    log.debug("knn_k=%d (star_weight=%.3f, top_k=%d)", knn_k, star_weight, top_k)
 
     # 各查询路: 中文(必有) + 英文(--dual-query)
+    t0 = time.monotonic()
     hit_lists: List[List[Dict[str, Any]]] = [search_knn(conn, qvec, k=knn_k)]
+    log.debug("repo_vectors kNN: %d hits in %.2fs (top1: %s dist=%.4f)",
+              len(hit_lists[0]), time.monotonic() - t0,
+              hit_lists[0][0]["id"] if hit_lists[0] else "-",
+              hit_lists[0][0]["distance"] if hit_lists[0] else 0)
+    for i, h in enumerate(hit_lists[0][:5]):
+        log.debug("  repo channel #%d: %s dist=%.4f", i+1, h["id"], h["distance"])
     en_text = None
     if dual_query:
         en_text = translate_to_english(query)
@@ -193,32 +226,58 @@ def semantic_search(
         has_readme = count_readme_vectors(conn) > 0
     except Exception:
         has_readme = False
+    log.debug("README vectors: %s", f"{count_readme_vectors(conn)} rows" if has_readme else "none")
     if has_readme:
+        t0 = time.monotonic()
         def _with_readme(hl):
             merged = {h["id"]: h["distance"] for h in hl}
+            source = {h["id"]: "repo" for h in hl}
+            repo_only = len(merged)
             for h in search_knn(conn, qvec, k=knn_k, table="repo_readme_vectors"):
                 rid, d = h["id"], h["distance"]
                 if rid not in merged or d < merged[rid]:
                     merged[rid] = d
-            return sorted(({"id": i, "distance": d} for i, d in merged.items()),
+                    source[rid] = "readme"
+                elif rid not in source:
+                    source[rid] = "repo"
+            log.debug("README merge: repo_only=%d, after_merge=%d, new_from_readme=%d",
+                      repo_only, len(merged), len(merged) - repo_only)
+            return sorted(({"id": i, "distance": d, "_source": source.get(i, "repo")}
+                           for i, d in merged.items()),
                           key=lambda x: x["distance"])
         hit_lists = [_with_readme(hl) for hl in hit_lists]
+        log.debug("README merge done in %.2fs", time.monotonic() - t0)
 
     hits = _fuse_knn(hit_lists) if len(hit_lists) > 1 else hit_lists[0]
+    log.debug("after fuse: %d hits", len(hits))
 
     # 收集候选 id（先排除 fork/archived 硬过滤）
     candidates: List[Dict[str, Any]] = []
     recalled = 0
+    skipped_fork = 0
+    skipped_archived = 0
     for h in hits:
         repo = get_repo(conn, h["id"])
         if not repo:
             continue
         recalled += 1
         if exclude_fork and repo.get("is_fork"):
+            skipped_fork += 1
             continue
         if exclude_archived and repo.get("is_archived"):
+            skipped_archived += 1
             continue
-        candidates.append((repo, h["distance"]))
+        candidates.append((repo, h["distance"], h.get("_source", "repo")))
+    log.debug("candidates: recalled=%d, filtered(fork=%d, archived=%d), kept=%d",
+              recalled, skipped_fork, skipped_archived, len(candidates))
+    for i, (repo, dist, src) in enumerate(candidates[:10]):
+        embed_text = (repo.get("embed_text") or "")[:120]
+        readme_preview = (repo.get("readme_embed_text") or "")[:120]
+        log.debug("  candidate #%d: %s dist=%.4f source=%s lang=%s",
+                  i+1, repo.get("id"), dist, src, repo.get("primary_language"))
+        log.debug("    embed_text: %s", embed_text)
+        if readme_preview:
+            log.debug("    readme_text: %s", readme_preview)
     if not candidates:
         return {"query": query, "mode": "semantic", "recalled": recalled,
                 "candidates": 0, "candidates_list": [], "note": "无候选。"}
@@ -226,9 +285,11 @@ def semantic_search(
     # 打分用本地 star 快照（repos.stars, 允许周级陈旧）——深窗口下对数千候选
     # 逐个在线拉 star 不可行（130+ GraphQL 批次）；仅最终 top_k 在线刷新展示值
     out: List[Dict[str, Any]] = []
-    for repo, dist in candidates:
+    skipped_stars = 0
+    for repo, dist, _src in candidates:
         stars = int(repo.get("stars") or 0)
         if stars < min_stars:
+            skipped_stars += 1
             continue
         topics = repo.get("topics") or []
         if isinstance(topics, str):
@@ -258,6 +319,12 @@ def semantic_search(
     else:
         out.sort(key=lambda c: c.get("_semantic_distance", 1e9))
         note = "纯语义排序（距离升序），star 仅作过滤不作排序（避免 star 淹没语义差异）。"
+    log.debug("before top_k truncate: %d candidates (min_stars filtered: %d)", len(out), skipped_stars)
+    for i, c in enumerate(out[:5]):
+        score = c.get("_score")
+        score_str = f" score={score}" if score is not None else ""
+        log.debug("  final #%d: %s dist=%.4f stars=%d%s",
+                  i+1, c["full_name"], c["_semantic_distance"], c["stars"], score_str)
     out = out[:top_k]
 
     # 仅对最终 top_k 在线刷新实时 stars（展示精度；失败保留快照值）
@@ -303,7 +370,20 @@ def main():
                         help="查询嵌入后端（须与目标库向量模型一致；默认取 GH_SEARCH_BACKEND）")
     parser.add_argument("--db", default=None, help="sqlite 路径")
     parser.add_argument("--json", action="store_true", help="仅输出 JSON")
+    parser.add_argument("--debug", action="store_true", help="输出调试日志到 stderr")
     args = parser.parse_args()
+
+    if args.debug:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s %(name)s %(message)s",
+            datefmt="%H:%M:%S",
+            stream=sys.stderr,
+        )
+    for noisy in ("pydot", "sentence_transformers", "urllib3", "httpx"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    from logsetup import setup as _setup_log
+    print(f"[log] {_setup_log(log, stderr_debug=args.debug)}", file=sys.stderr)
 
     star_weight = 0.0 if args.pure_semantic else args.star_weight
     try:

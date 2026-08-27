@@ -24,7 +24,7 @@ from github_client import GitHubClient
 DEFAULT_MAX_CHARS = 2000
 DEFAULT_KEEP_HEAD = 1200   # 保留 README 开头多少字符
 DEFAULT_KEEP_TAIL = 300    # 末尾再保留多少字符
-BATCH_SIZE = 20
+BATCH_SIZE = 10            # README 内容较长，10 条一批避免响应体过大
 
 # 常见 README 文件名，按优先级
 README_CANDIDATES = ["README.md", "README", "readme.md", "Readme.md",
@@ -72,13 +72,68 @@ def _fetch_readme(client: GitHubClient, full_name: str, branch: Optional[str]) -
     return None
 
 
+def _build_readme_query(alias: str, owner: str, name: str, branch: str) -> str:
+    """为单个仓库构造 README 查询片段（GraphQL 别名）。"""
+    expr = f"{branch}:README.md"
+    return f"""
+{alias}: repository(owner: "{owner}", name: "{name}") {{
+  object(expression: "{expr}") {{ ... on Blob {{ text }} }}
+}}"""
+
+
+def _batch_fetch_readme(
+    client: GitHubClient,
+    batch: list[Dict[str, Any]],
+) -> list[Dict[str, Any]]:
+    """批量拉取 README（10 条一批）；失败时逐个重试并跳过不存在的仓库。"""
+    fragments = []
+    aliases = []
+    for j, r in enumerate(batch):
+        alias = f"r{j}"
+        owner, _, name = r["full_name"].partition("/")
+        branch = r.get("default_branch") or "HEAD"
+        aliases.append(alias)
+        fragments.append(_build_readme_query(alias, owner, name, branch))
+    gql = "query { " + " ".join(fragments) + " }"
+    try:
+        data = client.graphql(gql)
+    except Exception:  # noqa: BLE001
+        # 批量失败 → 逐个重试，跳过不存在/无权限的仓库
+        for r in batch:
+            snippet = _fetch_readme(client, r["full_name"], r.get("default_branch"))
+            if snippet:
+                r["readme_snippet"] = _truncate(
+                    _strip_markdown(snippet),
+                    DEFAULT_MAX_CHARS, DEFAULT_KEEP_HEAD, DEFAULT_KEEP_TAIL,
+                )
+        return batch
+    # 批量成功 → 提取结果；README.md 为 null 的仓库逐个重试其他文件名
+    for alias, r in zip(aliases, batch):
+        blob = (data.get(alias) or {}).get("object")
+        if blob and blob.get("text"):
+            r["readme_snippet"] = _truncate(
+                _strip_markdown(blob["text"]),
+                DEFAULT_MAX_CHARS, DEFAULT_KEEP_HEAD, DEFAULT_KEEP_TAIL,
+            )
+        else:
+            # README.md 不存在 → 逐个尝试其他文件名
+            snippet = _fetch_readme(client, r["full_name"], r.get("default_branch"))
+            if snippet:
+                r["readme_snippet"] = _truncate(
+                    _strip_markdown(snippet),
+                    DEFAULT_MAX_CHARS, DEFAULT_KEEP_HEAD, DEFAULT_KEEP_TAIL,
+                )
+    return batch
+
+
 def enrich(client: GitHubClient, repos: list[Dict[str, Any]],
            max_chars: int, head: int, tail: int) -> list[Dict[str, Any]]:
-    """为每条候选附加截断后的 README 片段。"""
-    for r in repos:
-        snippet = _fetch_readme(client, r["full_name"], r.get("default_branch"))
-        if snippet:
-            r["readme_snippet"] = _truncate(_strip_markdown(snippet), max_chars, head, tail)
+    """为每条候选附加截断后的 README 片段（10 条一批 GraphQL 调用）。"""
+    global DEFAULT_MAX_CHARS, DEFAULT_KEEP_HEAD, DEFAULT_KEEP_TAIL
+    DEFAULT_MAX_CHARS, DEFAULT_KEEP_HEAD, DEFAULT_KEEP_TAIL = max_chars, head, tail
+    for i in range(0, len(repos), BATCH_SIZE):
+        batch = repos[i:i + BATCH_SIZE]
+        _batch_fetch_readme(client, batch)
     return repos
 
 

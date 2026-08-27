@@ -20,9 +20,13 @@ Step2  内存粗筛：
 
 import argparse
 import json
+import logging
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
+
+log = logging.getLogger("search_repos")
 
 from github_client import GitHubClient
 
@@ -43,6 +47,8 @@ DEFAULT_MIN_STARS = 200
 DEFAULT_STALE_DAYS = 180          # 超过 6 个月未推送视为僵尸
 DEFAULT_MAX_RECALLS = 400
 SEARCH_PAGE_SIZE = 100
+MAX_QUERY_TERMS = 5               # GitHub search 布尔算子上限 5 个；每组 ≤5 词（4 个 OR）留余量
+MIN_AND_RESULTS = 20              # AND 召回低于该数时，同组词降级 OR 重搜补池
 
 
 def _now() -> datetime:
@@ -54,77 +60,83 @@ def build_search_query(
     language: str,
     min_stars: int,
     pushed_since: str,
+    mode: str = "and",
 ) -> str:
     """构造 Step1 GraphQL search 查询串。
 
     2026-08 修复：此前 --query 从未拼进检索式（等于高星活跃仓库随机采样）。
     现在关键词始终参与搜索；GitHub 裸词会匹配 name/description/topics/readme。
+
+    mode="and"：多词空格连接（GitHub 隐式 AND，要求全部命中）——池子小而准，
+                但任一词不命中就整体为 0（分词/索引漂移易踩空）。
+    mode="or" ：多词 OR 连接（任一命中即匹配）——池子大而杂，靠后续排序兜底。
     """
-    parts = list(keywords.split())
+    kw_words = [kw for kw in keywords.split() if kw]
+    if len(kw_words) > 1:
+        joiner = " " if mode == "and" else " OR "
+        kw_part = joiner.join(kw_words)
+    else:
+        kw_part = kw_words[0] if kw_words else ""
+    filters = []
     if language:
-        parts.append(f"language:{language}")
-    parts.append("is:public")
-    parts.append("fork:false")          # 关键：不是 `not:fork`
-    parts.append("archived:false")
-    parts.append(f"stars:>{min_stars}")
-    parts.append(f"pushed:>={pushed_since}")
+        filters.append(f"language:{language}")
+    filters.append("is:public")
+    filters.append("fork:false")
+    filters.append("archived:false")
+    filters.append(f"stars:>{min_stars}")
+    filters.append(f"pushed:>={pushed_since}")
+    parts = [kw_part] + filters if kw_part else filters
     return " ".join(parts)
 
 
+def chunk_keywords(keywords: str, size: int = MAX_QUERY_TERMS) -> List[str]:
+    """把关键词串按 size 词一组分块。
+
+    GitHub search 限制布尔算子（AND/OR/NOT）≤5 个：超出时 REST 报
+    `422 More than five AND / OR / NOT operators`，GraphQL 更坑——静默返回
+    0 条。分块后每组作为独立搜索变体跑，合并去重，不丢召回。
+    """
+    words = [w for w in keywords.split() if w]
+    if not words:
+        return [""]
+    if len(words) <= size:
+        return [" ".join(words)]
+    return [" ".join(words[i:i + size]) for i in range(0, len(words), size)]
+
+
 def expand_keywords(intent: str) -> Dict[str, List[str]]:
-    """LLM 把检索意图改写成英文+中文关键词组（GitHub search 用）。"""
-    from ark_client import ArkChat
-    ark = ArkChat()
-    prompt = (
-        "你是 GitHub 搜索专家。把用户的检索意图改写成适合 GitHub repository "
-        "search 的关键词组合。\n"
-        "要求：\n"
-        "- en: 2-3 组英文关键词（技术社区惯用叫法），空格分隔单词\n"
-        "- zh: 1-2 组中文关键词（不少中文项目用中文写描述）\n"
-        "- 每组不超过 4 个词，不要加修饰性 stopwords\n"
-        f'用户意图: {intent}\n'
-        '只输出 JSON: {"en": ["kw1 kw2", ...], "zh": ["关键词", ...]}'
-    )
-    raw = ark.chat(prompt, max_tokens=256, json_mode=True)
-    try:
-        data = json.loads(raw)
-        return {
-            "en": [s for s in data.get("en", []) if isinstance(s, str) and s.strip()][:3],
-            "zh": [s for s in data.get("zh", []) if isinstance(s, str) and s.strip()][:2],
-        }
-    except json.JSONDecodeError:
-        return {"en": [intent], "zh": []}
+    """将关键词/意图转为搜索变体列表。
+
+    由调用方（外层 AI 插件）负责把用户意图转写成关键词再传入，
+    此函数直接透传，不做额外清洗。
+    """
+    return {"en": [intent], "zh": []}
 
 
-def llm_rerank(intent: str, candidates: List[Dict[str, Any]], top_n: int = 40) -> None:
-    """LLM 对候选就地重排（按与意图的相关性降序）。失败则保持原序。"""
-    if not candidates:
-        return
-    from ark_client import ArkChat
-    ark = ArkChat()
-    lines = [
-        f"{i}. {c['full_name']} | {str(c.get('description') or '')[:100]} | "
-        f"{','.join(c.get('topics') or [])[:60]} | {c.get('stars', 0)}★"
-        for i, c in enumerate(candidates[:top_n])
-    ]
-    prompt = (
-        "按与用户意图的相关性给下列 GitHub 仓库排序。\n"
-        f"用户意图: {intent}\n\n仓库列表:\n" + "\n".join(lines) +
-        '\n只输出 JSON: {"order": [索引从0开始, 相关性降序, 不必全排只排前25]}'
-    )
-    try:
-        raw = ark.chat(prompt, max_tokens=300, json_mode=True)
-        order = json.loads(raw).get("order", [])
-        idx = [i for i in order if isinstance(i, int) and 0 <= i < len(candidates)]
-        seen, uniq = set(), []
-        for i in idx:
-            if i not in seen:
-                seen.add(i)
-                uniq.append(i)
-        rest = [i for i in range(len(candidates)) if i not in seen]
-        candidates[:] = [candidates[i] for i in uniq + rest]
-    except Exception as e:  # noqa: BLE001
-        print(f"⚠️ LLM 重排失败，保持原序: {e}", file=sys.stderr)
+def recall_variant(
+    client: GitHubClient,
+    keywords: str,
+    language: str,
+    min_stars: int,
+    max_recalls: int,
+) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """单组关键词召回：AND 优先（精准小池），不足 MIN_AND_RESULTS 时同词降级 OR 补池。
+
+    还原旧版（空格连接=AND）的精准召回；AND 踩空（GitHub 分词/索引漂移、
+    词组过窄）时自动用 OR 保底，两轮结果按仓库去重合并。
+    返回 (仓库列表, 来源统计)；统计含 and/or 两轮原始条数，供上层汇总输出。
+    """
+    raw_and = step1_recall(client, keywords, language, min_stars, max_recalls, mode="and")
+    if len(raw_and) >= MIN_AND_RESULTS:
+        return raw_and, {"and": len(raw_and), "or": 0}
+    raw_or = step1_recall(client, keywords, language, min_stars, max_recalls, mode="or")
+    seen, uniq = set(), []
+    for r in raw_and + raw_or:
+        key = r.get("nameWithOwner")
+        if key and key not in seen:
+            seen.add(key)
+            uniq.append(r)
+    return uniq, {"and": len(raw_and), "or": len(raw_or)}
 
 
 def step1_recall(
@@ -133,16 +145,20 @@ def step1_recall(
     language: str,
     min_stars: int,
     max_recalls: int,
+    mode: str = "and",
 ) -> List[Dict[str, Any]]:
-    """Step1：分页召回原始仓库列表。"""
+    """Step1：分页召回原始仓库列表。mode 透传给 build_search_query（and/or）。"""
     pushed_since = (_now() - timedelta(days=DEFAULT_STALE_DAYS)).strftime("%Y-%m-%d")
-    query = build_search_query(keywords, language, min_stars, pushed_since)
+    query = build_search_query(keywords, language, min_stars, pushed_since, mode)
+    log.debug("Step1 query: %s", query)
 
     repos: List[Dict[str, Any]] = []
     cursor: str | None = None
     has_next = True
+    page = 0
 
     while has_next and len(repos) < max_recalls:
+        page += 1
         after = f', after: "{cursor}"' if cursor else ""
         quoted = json.dumps(query)
         gql = (
@@ -151,14 +167,20 @@ def step1_recall(
             "nodes { ... on Repository { %s } } } }"
             % (quoted, SEARCH_PAGE_SIZE, after, SEARCH_FIELDS)
         )
+        t0 = time.monotonic()
         data = client.graphql(gql)
+        elapsed = time.monotonic() - t0
         search = data.get("search", {})
+        repo_count = search.get("repositoryCount", 0)
         nodes = search.get("nodes", [])
         repos.extend(nodes)
         page_info = search.get("pageInfo", {})
         has_next = page_info.get("hasNextPage", False)
         cursor = page_info.get("endCursor")
+        log.debug("Step1 page %d: got %d nodes (total %d/%d), repo_count=%d, %.2fs",
+                  page, len(nodes), len(repos), max_recalls, repo_count, elapsed)
 
+    log.debug("Step1 done: %d raw repos", len(repos))
     return repos
 
 
@@ -193,6 +215,8 @@ def step2_coarse_filter(
             continue
         kept.append(r)
 
+    log.debug("Step2 filter: %d → kept=%d (dropped: fork=%d, archived=%d, stale=%d)",
+              len(repos), len(kept), dropped_fork, dropped_archived, dropped_stale)
     return kept
 
 
@@ -219,7 +243,11 @@ def _normalize(repo: Dict[str, Any]) -> Dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="第1+2步：GitHub 召回与粗筛")
-    parser.add_argument("--query", required=True, help="用户检索意图（自然语言）")
+    parser.add_argument("--query", default=None,
+                        help="用户检索意图（自然语言）。未提供 --group 时作为唯一搜索词")
+    parser.add_argument("--group", action="append", dest="groups", default=None,
+                        help="语义关键词组（调用方完成意图转写后传入），可重复；"
+                             "提供时优先于 --query 作为搜索变体")
     parser.add_argument("--language", default=None, help="限定编程语言")
     parser.add_argument("--min-stars", type=int, default=DEFAULT_MIN_STARS,
                         help=f"star 最低阈值（默认 {DEFAULT_MIN_STARS}）")
@@ -227,42 +255,73 @@ def main() -> None:
                         help=f"最大召回条数（默认 {DEFAULT_MAX_RECALLS}）")
     parser.add_argument("--stale-days", type=int, default=DEFAULT_STALE_DAYS,
                         help=f"超过该天数未推送视为僵尸（默认 {DEFAULT_STALE_DAYS}）")
-    parser.add_argument("--llm-expand", action="store_true", default=True,
-                        help="LLM 把意图改写为英文+中文关键词多路搜索并重排（默认开）")
-    parser.add_argument("--no-llm-expand", dest="llm_expand", action="store_false",
-                        help="关闭 LLM 改写，仅用原始意图文本作为关键词")
     parser.add_argument("--json", action="store_true", help="仅输出 JSON")
+    parser.add_argument("--debug", action="store_true", help="输出调试日志到 stderr")
     args = parser.parse_args()
+
+    if not args.query and not args.groups:
+        parser.error("需要 --query（用户检索意图）或至少一个 --group")
+    intent = args.query or " ".join(args.groups)
+
+    if args.debug:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s %(name)s %(message)s",
+            datefmt="%H:%M:%S",
+            stream=sys.stderr,
+        )
+    from logsetup import setup as _setup_log
+    print(f"[log] {_setup_log(log, stderr_debug=args.debug)}", file=sys.stderr)
+
+    log.debug("=== search_repos START ===")
+    log.debug("query: %s", intent)
+    log.debug("params: language=%s min_stars=%d max_recalls=%d stale_days=%d",
+              args.language, args.min_stars, args.max_recalls, args.stale_days)
 
     client = GitHubClient()
 
     try:
-        # 关键词通道：LLM 双语改写 → 多路搜索 → 合并 → LLM 重排
-        if args.llm_expand:
-            try:
-                kw = expand_keywords(args.query)
-            except Exception as e:  # noqa: BLE001
-                print(f"⚠️ LLM 改写失败，回退原始意图: {e}", file=sys.stderr)
-                kw = {"en": [args.query], "zh": []}
-            variants = kw["en"] + kw["zh"] or [args.query]
-            per_cap = max(30, args.max_recalls // len(variants))
-            print(f"[expand] 搜索变体: {variants}", file=sys.stderr)
-            merged: Dict[str, Dict[str, Any]] = {}
-            for v in variants:
-                try:
-                    raw = step1_recall(client, v, args.language, args.min_stars, per_cap)
-                except Exception as e:  # noqa: BLE001
-                    print(f"⚠️ 变体「{v}」召回失败: {e}", file=sys.stderr)
-                    continue
-                for r in step2_coarse_filter(raw, args.stale_days):
-                    n = _normalize(r)
-                    merged.setdefault(n["full_name"], n)
-            normalized = list(merged.values())
-            llm_rerank(args.query, normalized)
+        # 关键词通道：分块（防布尔算子超限）→ 多路搜索 → 合并去重。
+        # 意图→关键词转写、语义初筛与排序均由上层大模型（SKILL 工作流）负责，
+        # 本脚本保持纯确定性 CLI，不做任何 LLM 调用。
+        if args.groups:
+            base_variants = [g.strip() for g in args.groups if g.strip()]
+            log.debug("caller groups: %s", base_variants)
         else:
-            raw = step1_recall(client, args.query, args.language,
-                               args.min_stars, args.max_recalls)
-            normalized = [_normalize(r) for r in step2_coarse_filter(raw, args.stale_days)]
+            kw = expand_keywords(intent)
+            log.debug("expand_keywords: %s", kw)
+            base_variants = kw["en"] + kw["zh"] or [intent]
+        variants: List[str] = []
+        for v in base_variants:
+            variants.extend(chunk_keywords(v))
+        per_cap = max(30, args.max_recalls // len(variants))
+        log.debug("variants: %s (per_cap=%d)", variants, per_cap)
+        print(f"[expand] 搜索变体: {variants}", file=sys.stderr)
+        merged: Dict[str, Dict[str, Any]] = {}
+        for v in variants:
+            try:
+                t0 = time.monotonic()
+                raw, src = recall_variant(client, v, args.language, args.min_stars, per_cap)
+                log.debug("variant '%s': Step1=%d repos in %.2fs", v, len(raw), time.monotonic() - t0)
+            except Exception as e:  # noqa: BLE001
+                print(f"⚠️ 变体「{v}」召回失败: {e}", file=sys.stderr)
+                continue
+            filtered = step2_coarse_filter(raw, args.stale_days)
+            for r in filtered:
+                n = _normalize(r)
+                merged.setdefault(n["full_name"], n)
+            src_line = f"AND={src['and']}" + (f"+OR补池={src['or']}" if src["or"] else "")
+            print(f"[variant] 「{v}」{src_line} → 过滤后{len(filtered)} 累计{len(merged)}",
+                  file=sys.stderr)
+            log.debug("variant '%s': after merge %d unique", v, len(merged))
+        normalized = list(merged.values())
+        print(f"[done] {len(variants)} 组变体 → 合并去重 {len(normalized)} 条候选",
+              file=sys.stderr)
+        log.debug("merged: %d unique candidates", len(normalized))
+        for i, c in enumerate(normalized[:5]):
+            log.debug("  top #%d: %s stars=%d desc=%s",
+                      i+1, c["full_name"], c["stars"],
+                      (c.get("description") or "")[:80])
     except Exception as e:  # noqa: BLE001
         print(f"❌ Step1 召回失败：{e}", file=sys.stderr)
         sys.exit(1)
@@ -272,21 +331,19 @@ def main() -> None:
         sys.exit(0)
 
     result = {
-        "query": args.query,
+        "query": intent,
         "language": args.language,
         "min_stars": args.min_stars,
         "recalled": len(normalized),
         "candidates": len(normalized),
         "candidates_list": normalized,
-        "note": ("关键词通道：LLM 双语改写多路搜索 + LLM 重排"
-                 if args.llm_expand else
-                 "原始意图直搜。"),
+        "note": "关键词组召回 + 分块(≤5词) + AND优先OR兜底；初筛与排序由上层大模型完成",
     }
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
-        print(f"Step1 召回: {len(raw)} 条 → Step2 裁剪后: {len(normalized)} 条候选")
+        print(f"召回后: {len(normalized)} 条候选")
         print("（候选已输出，含元数据；description 为空者保留）")
         print(json.dumps(normalized, ensure_ascii=False, indent=2))
 

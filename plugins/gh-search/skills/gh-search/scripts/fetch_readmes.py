@@ -23,7 +23,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 from github_client import GitHubClient  # noqa: E402
@@ -98,7 +98,7 @@ def main():
 
     client = GitHubClient()
     ok = fail = 0
-    pending: List[tuple] = []
+    pending: list[tuple] = []
     t0 = time.time()
 
     def flush():

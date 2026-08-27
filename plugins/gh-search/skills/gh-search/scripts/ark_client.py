@@ -112,35 +112,37 @@ class ArkEmbed:
         """批量向量化；自动按 10 条分批，返回与输入等长的向量列表。"""
         trace = os.environ.get("ARK_TRACE") == "1"
         vecs: List[List[float]] = []
+        # 方舟API单条文本最大100000字节，超长截断
+        MAX_BYTES = 95000
         for i in range(0, len(texts), self.BATCH):
             chunk = texts[i:i + self.BATCH]
+            chunk = [t[:MAX_BYTES] if len(t.encode()) > MAX_BYTES else t for t in chunk]
             req_body = {"model": self.model, "input": chunk}
-            wait = 5.0
             t0 = time.time()
-            for attempt in range(6):
+            for attempt in range(3):
                 try:
                     r = self._post_raw("/embeddings", req_body)
                     break
                 except ArkError as e:
-                    is_429 = "429" in str(e)
-                    transient = is_429 or "503" in str(e) or "timeout" in str(e).lower()
-                    if not transient or attempt == 5:
-                        if is_429 and attempt == 5:
-                            # 429 重试耗尽，抛 QuotaExhausted 触发 key 轮换
-                            from build_index import QuotaExhausted
-                            raise QuotaExhausted(f"方舟 429 配额耗尽: {e}")
-                        raise
-                    if trace:
-                        print(f"[ark] chunk{i}: attempt{attempt} err={str(e)[:60]} wait{wait:.0f}s",
-                              file=sys.stderr)
-                    time.sleep(wait)
-                    wait = min(wait * 2, 60)
+                    err = str(e)
+                    if "429" in err:
+                        if "AccountQuotaExceeded" in err:
+                            # 月配额用完，不可恢复，直接抛出由外层跳过此 key
+                            raise
+                        # AccountRateLimitExceeded，限速，等待后重试
+                        if attempt < 2:
+                            if trace:
+                                print(f"[ark] chunk{i}: attempt{attempt} err={str(e)[:60]} wait{attempt*3}s",
+                                      file=sys.stderr)
+                            time.sleep(3 * (attempt + 1))
+                            continue
+                    raise
             dt = time.time() - t0
             if trace:
                 print(f"[ark] chunk{i}: {len(chunk)}条 {r['usage']['total_tokens']}tok {dt:.2f}s",
                       file=sys.stderr)
             vecs += [d["embedding"] for d in r["data"]]
-            time.sleep(0.05)     # 轻微间隔；触发 429 时由上方退避接管
+            time.sleep(0.05)
         return vecs
 
     def _post_raw(self, path: str, body: dict) -> dict:

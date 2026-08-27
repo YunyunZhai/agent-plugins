@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
+from ark_client import ArkError
 from sqlite_store import (
     DB_PATH,
     EMBED_DIM,
@@ -126,17 +127,38 @@ def build_index(db_path: Optional[str] = None, limit: int = DEFAULT_LIMIT,
     _keys: List[str] = []
     pc = None
     if backend == "ark":
-        # 多个嵌入账号（逗号分隔）自动轮换：一个撞 429 配额后切下一个继续
-        _ark_keys = [
-            k.strip() for k in
-            os.environ.get("ARK_API_KEY", "").split(",") if k.strip()
-        ]
+        # 格式: key1|baseurl1,key2|baseurl2 或 仅 key1,key2（使用默认 baseurl）
+        raw = os.environ.get("ARK_API_KEYS", "") or os.environ.get("ARK_API_KEY", "")
+        _ark_keys = []
+        _ark_urls = []
+        for item in raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if "|" in item:
+                k, u = item.split("|", 1)
+                _ark_keys.append(k.strip())
+                _ark_urls.append(u.strip())
+            else:
+                _ark_keys.append(item)
+                _ark_urls.append(None)
         if not _ark_keys:
-            raise EmbedError("未设置 ARK_API_KEY 环境变量（多个密钥用逗号分隔）")
+            raise EmbedError("未设置 ARK_API_KEYS 环境变量")
+        # 多进程分片时自动绑定对应 key: shard 0→key0, shard 1→key1, shard 2→key2
+        # 若 shard 索引超出 key 数量则取模回绕
+        if shard:
+            si, sn = map(int, shard.split(":"))
+            key_idx = si % len(_ark_keys)
+        else:
+            si, sn = 0, 1
+            key_idx = 0
         if not dry_run:
             from ark_client import ArkEmbed
             try:
-                _ark = ArkEmbed(api_key=_ark_keys[0])
+                _ark = ArkEmbed(api_key=_ark_keys[key_idx], base_url=_ark_urls[key_idx])
+                _ark._key_idx = key_idx
+                print(f"[index] ark 后端 shard={si}:{sn} → 绑定 key[{key_idx}]（共 {len(_ark_keys)} 个 key）"
+                      f" base_url={_ark_urls[key_idx] or '默认'}")
             except Exception as e:  # noqa: BLE001
                 raise EmbedError(str(e))
     elif backend == "local":
@@ -184,6 +206,7 @@ def build_index(db_path: Optional[str] = None, limit: int = DEFAULT_LIMIT,
             print("   ", (row["embed_text"] if row else "")[:100])
         return {"todo": total, "dry_run": True}
 
+    _quota_stop = False
     for start in range(0, total, batch):
         batch_ids = todo[start:start + batch]
         texts = []
@@ -199,50 +222,48 @@ def build_index(db_path: Optional[str] = None, limit: int = DEFAULT_LIMIT,
         while vectors is None:
             try:
                 if backend == "ark":
-                    try:
-                        vectors = _ark.embed(texts)
-                    except Exception as e:  # noqa: BLE001
-                        raise EmbedError(f"方舟嵌入失败: {e}")
+                    vectors = _ark.embed(texts)
                 elif backend == "local":
-                    try:
-                        vectors = embed_batch_local(texts, model)
-                    except Exception as e:  # noqa: BLE001
-                        raise EmbedError(f"本地嵌入失败: {e}")
+                    vectors = embed_batch_local(texts, model)
                 else:
                     vectors = embed_batch(pc, model, texts)
-            except QuotaExhausted:
-                if backend == "ark":
-                    key_idx = getattr(_ark, "_key_idx", 0)
-                    next_idx = key_idx + 1
-                    if next_idx >= len(_ark_keys):
-                        print(f"\n[quota] 全部 {len(_ark_keys)} 个方舟账号当月配额均耗尽, 停止。"
-                              f"已嵌 {done}/{total} 条, 剩余部分断点续传: "
-                              f"重设 ARK_API_KEY 后重跑即可。")
-                        break
-                    print(f"  [quota] 方舟账号{key_idx} 配额耗尽, 切换到账号{next_idx}...")
-                    _ark = ArkEmbed(api_key=_ark_keys[next_idx])
-                    _ark._key_idx = next_idx
+                break  # 成功，跳出 while
+            except ArkError as e:
+                err = str(e)
+                if "429" in err:
+                    if "AccountQuotaExceeded" in err:
+                        # 月配额用完
+                        key_idx = getattr(_ark, "_key_idx", 0)
+                        if shard:
+                            # 分片模式: 每个 worker 绑定一个 key, 配额耗尽直接停止
+                            print(f"\n[quota] 账号{key_idx} 月配额用完, worker 停止。"
+                                  f"已嵌 {done}/{total} 条")
+                            _quota_stop = True
+                            break
+                        # 非分片模式: 尝试切换到下一个可用 key
+                        print(f"  [quota] 账号{key_idx} 月配额用完, 跳过...")
+                        _ark_keys[key_idx] = None  # 标记不可用
+                        available = [i for i, k in enumerate(_ark_keys) if k is not None]
+                        if not available:
+                            print(f"\n[quota] 全部账号配额耗尽, 停止。"
+                                  f"已嵌 {done}/{total} 条, 断点续传: 重设 ARK_API_KEYS 后重跑即可。")
+                            break
+                        next_idx = available[0]
+                        print(f"  [quota] 切换到账号{next_idx}...")
+                        _ark = ArkEmbed(api_key=_ark_keys[next_idx], base_url=_ark_urls[next_idx])
+                        _ark._key_idx = next_idx
+                    else:
+                        # AccountRateLimitExceeded，限速，等待后继续
+                        print(f"  [429] 限速, 等待 10s...")
+                        time.sleep(10)
                 else:
-                    key_idx = getattr(pc, "_embed_key_idx", 0)
-                    next_idx = key_idx + 1
-                    if next_idx >= len(_keys):
-                        print(f"\n[quota] 全部 {len(_keys)} 个嵌入账号当月配额均耗尽, 停止。"
-                              f"已嵌 {done}/{total} 条, 剩余部分断点续传: "
-                              f"重设 PINECONE_EMBED_KEY 后重跑即可。")
-                        break
-                    print(f"  [quota] 嵌入账号{key_idx} 配额耗尽, 切换到账号{next_idx}...")
-                    pc = Pinecone(api_key=_keys[next_idx])
-                    pc._embed_key_idx = next_idx
-            except EmbedError as e:
-                attempts += 1
-                if attempts >= 4:
                     raise
-                wait = min(5 * 2 ** (attempts - 1), 40)
-                print(f"  [retry] {e}\n  [retry] {wait}s 后第 {attempts}/3 次重试...")
-                time.sleep(wait)
 
         if vectors is None:  # 全部账号配额耗尽，stop
-            break
+            if _quota_stop:  # 分片模式 worker 配额耗尽，直接退出
+                break
+            time.sleep(30)  # 等待配额恢复后继续
+            continue
 
         for i, vec, text in zip(batch_ids, vectors, texts):
             if len(vec) != EMBED_DIM:
@@ -252,6 +273,10 @@ def build_index(db_path: Optional[str] = None, limit: int = DEFAULT_LIMIT,
             record_embed(conn, i, model, 0, embed_text=text)
             done += 1
         conn.commit()
+
+        # 方舟后端：批次间延迟避免限速
+        if backend == "ark":
+            time.sleep(1)
 
         # token 统计（可选：Pinecone embed 返回 usage）
         try:
@@ -284,6 +309,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="只预览不实际嵌入")
     parser.add_argument("--shard", default=None,
                         help="分片 i:n（多进程/多 key 并行时各取一路，如 0:2 / 1:2）")
+    parser.add_argument("--force-ids-file", default=None,
+                        help="强制重嵌指定文件中的 repo id 列表（每行一个 id）")
     args = parser.parse_args()
 
     model = args.model or {
@@ -291,8 +318,14 @@ def main():
         "local": "BAAI/bge-m3(int8-onnx)",
     }.get(args.backend, EMBED_MODEL)
 
+    force_ids = None
+    if args.force_ids_file:
+        with open(args.force_ids_file) as f:
+            force_ids = [line.strip() for line in f if line.strip()]
+
     try:
         stats = build_index(args.db, args.limit, model, args.batch, args.dry_run,
+                            force_ids=force_ids,
                             backend=args.backend, shard=args.shard)
         if not args.dry_run and stats.get("embedded", 0) == 0:
             print("[提示] 没有新嵌入。若想强制重建，请删除 embed_status 对应行。")
