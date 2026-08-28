@@ -52,6 +52,24 @@ GitHub CLI 未认证。请运行 `gh auth login` 完成登录。
 
 **建议**：放宽 star 阈值 / 语言 / 活跃窗口后重试。
 
+## 6. Rerank API 失败（Step 4.5）
+
+**症状**：
+```
+⚠️ rerank API 调用失败（3 次重试后）: ...
+⚠️ rerank 失败，使用原始顺序
+```
+
+**可能原因**：
+- `DASHSCOPE_API_KEY` 或 `DASHSCOPE_RERANK_URL` 未配置
+- API Key 无效或过期
+- 网络超时 / 百炼服务限流
+
+**处理**：
+- 脚本自动降级：跳过 rerank，输出原始顺序，不中断流程
+- LLM 仍可正常排序（无 `_rerank_score` 时按原有逻辑排序）
+- 若需修复：检查环境变量、确认 API Key 有效、稍后重试
+
 ## 关键约束回顾
 
 1. 查询侧不能过滤 PR/commit 统计，只能召回后小集合二次查询。

@@ -137,22 +137,41 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/fetch_readme.py \
 
 批量拉取 Step 3 小集合的 README 并**截断**（不拿全文）。简易模式直接跳过此步。
 
+### Step 4.5 — Rerank 精排（可选，需 DASHSCOPE_API_KEY + DASHSCOPE_RERANK_URL）
+
+对 Step 3 或 Step 4 的候选集调用百炼 `qwen3-rerank` 模型，按 query-document 相关性做精细化二次排序：
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/rerank_results.py \
+  --input <step3.json 或 step4.json> \
+  --query "<用户检索意图>" \
+  --top-n 30 \
+  --json
+```
+
+- 需要环境变量 `DASHSCOPE_API_KEY` + `DASHSCOPE_RERANK_URL`（格式 `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com`）
+- 失败时自动降级到原始顺序，不中断流程
+- 输出附加 `_rerank_score` 字段（0-1，越高越相关），按分数降序
+- `--top-n` 控制输出条数（默认 50），LLM 拿到更精简的候选集
+
 ## 交给大模型的输入与最终输出
 
 ### LLM 输入
 
-用户原始查询意图 + Step 3（+Step 4 可选 README 片段）的候选项目数组。每条项目携带：
-`repo 名称、star、fork、topics、description、createdAt、pushedAt、近30天commit、合并PR、【可选 README 片段】`
+用户原始查询意图 + Step 3/4.5 的候选项目数组。每条项目携带：
+`repo 名称、star、fork、topics、description、createdAt、pushedAt、近30天commit、合并PR、【可选 README 片段】、【可选 _rerank_score】`
+
+若 Step 4.5 已执行，候选已按 rerank 分数排序，LLM 可优先使用 `_rerank_score` 作为排序参考。
 
 ### 最终排序与输出（subagent 执行，主会话只收 Top-N 文案）
 
 排序数据体量大（富化指标 + 可选 README 片段），同样派 **Task 子代理**完成：
 
-- **prompt 自包含**：用户意图原文、step3.json（及深度模式的 readme 增强文件）路径
+- **prompt 自包含**：用户意图原文、step3.json（及深度模式的 readme 增强文件 / rerank 结果）路径
 - **任务**：
   1. 剔除语义不匹配、玩具 Demo 项目；区分【成熟高置信项目】/【潜力新项目】两组
   2. 每个项目一句话能力说明 + 成熟度风险提示（单人维护、版本状态等）
-  3. 按匹配度 & 社区权威度排序；给出对比摘要（如资源、适用场景）
+  3. 若有 `_rerank_score`，优先按此分数排序；否则按匹配度 & 社区权威度排序；给出对比摘要（如资源、适用场景）
 - **输出契约**：完整排序写入 final.json 备查；向主会话只返回 Top-10 推荐文案（直接展示给用户）
 
 ## 关键约束（务必遵守）
@@ -162,8 +181,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/fetch_readme.py \
 3. 不把 commit>X 作为硬必选条件，保护改动少的稳定成熟库。
 4. README 作为可选增强，默认关闭，降低 token、网络开销。
 5. 脚本保持确定性 CLI、零 LLM 调用：意图转写（Step1 前）、语义初筛（Step2）、
-   相关性排序（最终输出）均由大模型完成；其中 Step2 与最终排序通过 subagent
-   执行，候选大列表不进入主会话上下文。
+   相关性排序（最终输出）均由大模型完成；reranker API（Step 4.5）不算 LLM 调用，
+   用于预排序减轻 LLM 负担；Step2 与最终排序通过 subagent 执行，候选大列表不进入主会话上下文。
 
 ## 错误处理
 
@@ -178,6 +197,16 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/fetch_readme.py \
 语义通道依赖本地 sqlite-vec 索引。**当前生产库为 `gh_search_qwen.db`**
 （qwen3.7-text-embedding，1024 维，43 万仓库全量 + 3 万仓库 README 双通道，
 百炼 Batch 批量产出）。架构细节与决策依据见 `references/architecture.md`。
+
+### 环境变量
+
+| 变量 | 用途 | 必需场景 |
+|------|------|---------|
+| `DASHSCOPE_API_KEY` | 百炼 API Key | 语义通道（`--backend dashscope`）、Rerank |
+| `DASHSCOPE_BASE_URL` | 百炼嵌入 API 端点 | 语义通道 `--backend dashscope` |
+| `DASHSCOPE_RERANK_URL` | 百炼 rerank API 端点（格式 `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com`） | Step 4.5 Rerank |
+| `GH_SEARCH_BACKEND` | 查询嵌入后端（`local` / `dashscope` / `pinecone` / `ark`） | 语义通道 |
+| `GH_SEARCH_DB` | sqlite 库路径 | 语义通道 |
 
 ```bash
 # 查询（生产姿势；后端必须与库的模型一致）
