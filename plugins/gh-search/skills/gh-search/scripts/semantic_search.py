@@ -2,7 +2,7 @@
 """
 在线语义召回（gh-search 三通道中的"语义通道"）。
 
-输入自然语言 query → Pinecone 嵌入 → sqlite-vec kNN 召回 → 过滤 → 输出候选。
+输入自然语言 query → 嵌入模型向量化 → sqlite-vec kNN 召回 → 过滤 → 输出候选。
 
 输出结构与 search_repos.py 完全一致（candidates_list 同构），便于 SKILL.md
 在三通道（关键词 / 语义 / 并行）中 union 合并。
@@ -14,6 +14,9 @@
 环境变量:
     PINECONE_API_KEY  - Pinecone API 密钥(必需, 用于 query 嵌入)
     PINECONE_MODEL    - 嵌入模型(默认 llama-text-embed-v2)
+    DASHSCOPE_API_KEY / DASHSCOPE_BASE_URL
+                     - 百炼 OpenAI 兼容端点密钥/BaseURL(--backend dashscope 必需)
+    DASHSCOPE_MODEL   - 百炼嵌入模型(默认 qwen3.7-text-embedding)
     GH_SEARCH_DB      - sqlite 路径
 """
 
@@ -46,6 +49,10 @@ DEFAULT_STAR_WEIGHT = 0.03   # 混合排序: 每 10 倍 star 抵扣 0.03 个语�
                              # (λ 扫描实测: 0.03 使 alist/LitePan 同入全库前50;
                              #  0.08 会放行 mega-list 挤掉真相关小项目)
 
+DASHSCOPE_MODEL = os.environ.get("DASHSCOPE_MODEL", "qwen3.7-text-embedding")
+DASHSCOPE_INSTRUCT = ("Given a web search query, retrieve relevant passages "
+                      "that answer the query\nQuery: {}")
+
 
 class SemanticError(RuntimeError):
     """语义召回失败"""
@@ -61,8 +68,34 @@ def hybrid_score(distance: float, stars: int, star_weight: float) -> float:
     return distance - star_weight * math.log10(1 + max(stars, 0))
 
 
+def _dashscope_embed(query: str) -> List[float]:
+    """百炼 OpenAI 兼容端点嵌入 query（qwen3.7-text-embedding，text_type=query + instruct）。"""
+    key = os.environ.get("DASHSCOPE_API_KEY", "")
+    base = os.environ.get("DASHSCOPE_BASE_URL", "")
+    if not key or not base:
+        raise SemanticError("未设置 DASHSCOPE_API_KEY / DASHSCOPE_BASE_URL 环境变量")
+    import requests
+    headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
+    body = {"model": DASHSCOPE_MODEL, "input": query, "dimensions": EMBED_DIM,
+            "text_type": "query", "instruct": DASHSCOPE_INSTRUCT.format(query)}
+    last = None
+    for attempt in range(6):
+        try:
+            r = requests.post(base + "/embeddings", headers=headers, json=body, timeout=60)
+            r.raise_for_status()
+            return r.json()["data"][0]["embedding"]
+        except Exception as e:
+            last = e
+            if attempt == 5:
+                break
+            time.sleep(5 * (attempt + 1))
+    raise SemanticError(f"百炼 query 嵌入失败: {last}")
+
+
 def embed_query(query: str, model: str = EMBED_MODEL, backend: str = "pinecone") -> List[float]:
-    """把用户 query 嵌入为向量。backend: pinecone | ark(方舟 doubao) | local(bge-m3)。"""
+    """把用户 query 嵌入为向量。backend: pinecone | ark(方舟 doubao) | local(bge-m3) | dashscope(百炼 qwen)。"""
+    if backend == "dashscope":
+        return _dashscope_embed(query)
     if backend == "ark":
         try:
             from ark_client import ArkEmbed
@@ -365,7 +398,7 @@ def main():
                         help="回退纯语义距离排序（等价 --star-weight 0）")
     parser.add_argument("--dual-query", action="store_true",
                         help="中英双语查询 RRF 融合（LLM 翻译，需 ARK_API_KEY）")
-    parser.add_argument("--backend", choices=["pinecone", "ark", "local"],
+    parser.add_argument("--backend", choices=["pinecone", "ark", "local", "dashscope"],
                         default=os.environ.get("GH_SEARCH_BACKEND", "pinecone"),
                         help="查询嵌入后端（须与目标库向量模型一致；默认取 GH_SEARCH_BACKEND）")
     parser.add_argument("--db", default=None, help="sqlite 路径")

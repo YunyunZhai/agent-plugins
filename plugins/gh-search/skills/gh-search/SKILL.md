@@ -170,20 +170,23 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/fetch_readme.py \
 - `gh` 未认证 → 引导 `gh auth login`，不崩溃
 - 单仓库无权限/不存在 → 跳过该仓库，继续处理其余
 - 网络抖动 → 脚本内置重试；仍失败则提示用户重试
-- 语义通道需本地索引（bge-m3, `--backend local`）；索引缺失时自动回退关键词通道
+- 语义通道需本地索引（qwen3.7, `--backend dashscope`，需 DASHSCOPE_API_KEY）；索引缺失时自动回退关键词通道
 - 详见 `references/error-handling.md`
 
 ## 索引维护（语义通道的数据源）
 
-语义通道依赖本地 sqlite-vec 索引。**当前生产库为 `gh_search_index_v3.db`**
-（bge-m3 fp32，1024 维，43 万仓库全量，Kaggle 免费 T4 批量产出）。
-架构细节与决策依据见 `references/architecture.md`，踩坑实录见
-`references/embedding-engineering-notes.md`。
+语义通道依赖本地 sqlite-vec 索引。**当前生产库为 `gh_search_qwen.db`**
+（qwen3.7-text-embedding，1024 维，43 万仓库全量 + 3 万仓库 README 双通道，
+百炼 Batch 批量产出）。架构细节与决策依据见 `references/architecture.md`。
 
 ```bash
 # 查询（生产姿势；后端必须与库的模型一致）
-GH_SEARCH_BACKEND=local GH_SEARCH_DB=<插件data目录>/gh_search_index_v3.db \
+# 需 DASHSCOPE_API_KEY + DASHSCOPE_BASE_URL
+GH_SEARCH_BACKEND=dashscope GH_SEARCH_DB=<插件data目录>/gh_search_qwen.db \
   python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/semantic_search.py --query "..." --top-k 15
+
+# 全量重建（百炼 Batch，见 /tmp 管线说明；先导文件→提交→下载→回导）
+# 增量补嵌新仓库用 build_index.py --backend dashscope --db <qwen库>（需脚本侧 Batch 支持）
 
 # 星数快照刷新（混合排序的先验数据源，覆盖 ≥2000★，每周一次，约 40 分钟）
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/fetch_repos.py --sync-stars --db <v3库>
@@ -207,6 +210,8 @@ star 先验救回元数据稀疏的头部项目（alist 实测从全库第 1361 
 
 | 库文件 | 模型 | 维度 | 查询后端 |
 |--------|------|------|----------|
+| gh_search_qwen.db | qwen3.7-text-embedding (百炼) | 1024 | `--backend dashscope` |
+| gh_search_index_v3.db | bge-m3 (本地) | 1024 | `--backend local` |
 | gh_search_index.db | llama-text-embed-v2 (Pinecone) | 1024 | `--backend pinecone` |
 | gh_search_index_v2.db | doubao-embedding-vision (方舟) | 2048 | `--backend ark` + `GH_SEARCH_EMBED_DIM=2048` |
 
@@ -219,6 +224,6 @@ ARK_API_KEY=<key> ARK_BASE_URL=<套餐端点> GH_SEARCH_EMBED_DIM=2048 \
 ```
 </details>
 
-- **README 双通道（已启用）**：`repo_readme_vectors` 已入库 30,378 条（stars≥2000 仓库全量，Kaggle T4 嵌入），检索时自动按 id 取双表最小距离，无需开关
+- **README 双通道（已启用）**：`repo_readme_vectors` 已入库 30,378 条（stars≥2000 仓库全量，qwen3.7 Batch 嵌入），检索时自动按 id 取双表最小距离，无需开关
 - **依赖**：本地后端需 `pip install sqlite-vec sentence-transformers onnxruntime`；方舟/Pinecone 各需对应 SDK 与密钥
 - 索引未构建时，SKILL 自动使用**通道1关键词**，不影响基本功能
