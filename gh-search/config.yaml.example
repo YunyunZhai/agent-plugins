@@ -1,0 +1,17 @@
+# gh-search REST 服务配置
+# 复制为 config.yaml 并填入真实值
+
+github:
+  token: ""                    # 留空则从 gh CLI 凭据获取
+  timeout: 60                  # 单次 GitHub API 调用超时（秒）
+
+embedding:
+  backend: local               # local / pinecone / ark / dashscope
+  db_path: ""                  # sqlite 路径，留空使用默认（gh_search_qwen.db）
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+billing:
+  db_path: "data/billing.db"   # 计费数据库路径

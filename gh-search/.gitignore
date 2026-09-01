@@ -1,0 +1,12 @@
+# 分片进度文件（fetch_resume 用，勿提交）
+regions.pkl
+
+# 本地语义索引数据库（体积大，重建/增量维护）
+data/
+__pycache__/
+
+# 运行时配置（含 token，勿提交）
+config.yaml
+
+# 日志
+*.log
