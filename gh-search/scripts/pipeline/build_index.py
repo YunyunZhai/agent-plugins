@@ -55,7 +55,7 @@ _LOCAL_MODEL = None       # 进程内缓存，避免重复加载
 
 
 def _get_local_model():
-    """加载本地 bge-m3 int8 ONNX 模型（进程内单例）。"""
+    """加载本地 bge-m3 fp32 ONNX 模型（进程内单例）。"""
     global _LOCAL_MODEL
     if _LOCAL_MODEL is None:
         import glob
@@ -301,7 +301,7 @@ def main():
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
                         help="只嵌入前 N 条（默认全部）")
     parser.add_argument("--backend", choices=["pinecone", "ark", "local"], default="pinecone",
-                        help="嵌入后端（ark=doubao 2048维 / local=bge-m3 int8 本地, 须配对应维度库）")
+                        help="嵌入后端（ark=doubao 2048维 / local=bge-m3 fp32 本地, 须配对应维度库）")
     parser.add_argument("--model", default=None,
                         help="嵌入模型（默认按 backend: pinecone=llama-text-embed-v2 / ark=doubao-embedding-vision / local=BAAI-bge-m3）")
     parser.add_argument("--batch", type=int, default=EMBED_BATCH,
@@ -315,7 +315,7 @@ def main():
 
     model = args.model or {
         "ark": "doubao-embedding-vision",
-        "local": "BAAI/bge-m3(int8-onnx)",
+        "local": "BAAI/bge-m3(fp32-onnx)",
     }.get(args.backend, EMBED_MODEL)
 
     force_ids = None

@@ -128,6 +128,9 @@ python3 scripts/data/fetch_repos.py --stars-min 100
 # 嵌入向量（本地 bge-m3, 当前生产路径）
 python3 scripts/pipeline/build_index.py --backend local --db gh-search/data/gh_search_index_v3.db
 
+# 星数快照刷新（排序先验数据源，每周一次，覆盖 ≥2000★）
+python3 scripts/maintenance/sync_stars.py --db gh-search/data/gh_search_index_v3.db
+
 # 每周增量：只插新仓库（近7天新活跃）
 python3 scripts/maintenance/incremental_update.py --mode week --since 7 \
   --db gh-search/data/gh_search_index_v3.db
