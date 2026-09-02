@@ -28,8 +28,10 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 
-from github_client import GitHubClient
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from _common.github_client import GitHubClient
 
 DEFAULT_MIN_COMMITS_30D = 3
 DEFAULT_STALE_DAYS = 180

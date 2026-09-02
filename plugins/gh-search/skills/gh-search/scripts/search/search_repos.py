@@ -25,10 +25,12 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
+from pathlib import Path
 
 log = logging.getLogger("search_repos")
 
-from github_client import GitHubClient
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from _common.github_client import GitHubClient
 
 # 候选字段（GraphQL search 返回后无需额外请求）
 SEARCH_FIELDS = """
@@ -270,7 +272,7 @@ def main() -> None:
             datefmt="%H:%M:%S",
             stream=sys.stderr,
         )
-    from logsetup import setup as _setup_log
+    from _common.logsetup import setup as _setup_log
     print(f"[log] {_setup_log(log, stderr_debug=args.debug)}", file=sys.stderr)
 
     log.debug("=== search_repos START ===")

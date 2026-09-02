@@ -101,21 +101,21 @@ pip install --user sentence-transformers  # local 后端（bge-m3）
 
 ```bash
 # 通道1 关键词召回（先转写成 3~5 组关键词，--group 可重复）
-python3 skills/gh-search/scripts/search_repos.py \
+python3 skills/gh-search/scripts/search/search_repos.py \
   --query "网络安全 安全扫描" \
   --group "security scanner" --group "vulnerability scan" --group "安全扫描" \
   --language python --json
 
 # 通道2 语义召回（需已构建索引）
-python3 skills/gh-search/scripts/semantic_search.py \
+python3 skills/gh-search/scripts/search/semantic_search.py \
   --query "启动快的编码智能体" --top-k 50 --json
 
 # Step3：成熟度指标过滤
-python3 skills/gh-search/scripts/enrich_metrics.py \
+python3 skills/gh-search/scripts/search/enrich_metrics.py \
   --input step2.json --json
 
 # Step4：深度模式 README 片段
-python3 skills/gh-search/scripts/fetch_readme.py \
+python3 skills/gh-search/scripts/search/fetch_readme.py \
   --input step3.json --json
 ```
 
@@ -123,17 +123,20 @@ python3 skills/gh-search/scripts/fetch_readme.py \
 
 ```bash
 # 首次全量抓取（stars:>100 约47万仓库, 后台数小时, 中断可 --resume）
-python3 skills/gh-search/scripts/fetch_repos.py --stars-min 100
+python3 skills/gh-search/scripts/data/fetch_repos.py --stars-min 100
 
 # 嵌入向量（本地 bge-m3, 当前生产路径）
-python3 skills/gh-search/scripts/build_index.py --backend local --db plugins/gh-search/data/gh_search_index_v3.db
+python3 skills/gh-search/scripts/pipeline/build_index.py --backend local --db plugins/gh-search/data/gh_search_index_v3.db
+
+# 星数快照刷新（排序先验数据源，每周一次，覆盖 ≥2000★）
+python3 skills/gh-search/scripts/maintenance/sync_stars.py --db plugins/gh-search/data/gh_search_index_v3.db
 
 # 每周增量：只插新仓库（近7天新活跃）
-python3 skills/gh-search/scripts/incremental_update.py --mode week --since 7 \
+python3 skills/gh-search/scripts/maintenance/incremental_update.py --mode week --since 7 \
   --db plugins/gh-search/data/gh_search_index_v3.db
 
 # 每月增量：变化检测重嵌（抓近30天活跃, 只对描述/topics变了的重嵌）
-python3 skills/gh-search/scripts/incremental_update.py --mode month --since 30 \
+python3 skills/gh-search/scripts/maintenance/incremental_update.py --mode month --since 30 \
   --db plugins/gh-search/data/gh_search_index_v3.db
 ```
 

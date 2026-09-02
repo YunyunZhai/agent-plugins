@@ -25,8 +25,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-sys.path.insert(0, str(Path(__file__).parent))
-from github_client import GitHubClient  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from _common.github_client import GitHubClient  # noqa: E402
 
 
 def clean_readme(text: str) -> str:
@@ -67,7 +67,7 @@ def main():
                     help="清洗后保留头部字符数（默认 1000）")
     args = ap.parse_args()
 
-    import sqlite_store as ss
+    import _common.sqlite_store as ss
     conn = ss.connect(args.db)
 
     if args.sample:

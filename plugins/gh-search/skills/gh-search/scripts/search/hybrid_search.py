@@ -23,7 +23,7 @@ from typing import Any, Dict, List
 
 log = logging.getLogger("hybrid_search")
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 def hybrid_search(
@@ -36,7 +36,7 @@ def hybrid_search(
     db_path: str | None = None,
 ) -> Dict[str, Any]:
     """并行调用关键词通道和语义通道，union 合并结果。"""
-    from search_repos import main as _  # noqa: F401 – ensure importable
+    from search.search_repos import main as _  # noqa: F401 – ensure importable
 
     log.debug("=== hybrid_search START ===")
     log.debug("query: %s", query)
@@ -49,8 +49,8 @@ def hybrid_search(
     log.debug("--- channel 1: keyword search ---")
     t0 = time.monotonic()
     try:
-        from search_repos import step1_recall, step2_coarse_filter, _normalize
-        from github_client import GitHubClient
+        from search.search_repos import step1_recall, step2_coarse_filter, _normalize
+        from _common.github_client import GitHubClient
 
         client = GitHubClient()
         raw = step1_recall(client, query, language, min_stars, top_k * 3)
@@ -74,7 +74,7 @@ def hybrid_search(
     log.debug("--- channel 2: semantic search ---")
     t1 = time.monotonic()
     try:
-        from semantic_search import semantic_search
+        from search.semantic_search import semantic_search
 
         sem_result = semantic_search(
             query, top_k=top_k, min_stars=min_stars,
@@ -180,7 +180,7 @@ def main():
         )
     for noisy in ("pydot", "sentence_transformers", "urllib3", "httpx"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
-    from logsetup import setup as _setup_log
+    from _common.logsetup import setup as _setup_log
     print(f"[log] {_setup_log(log, stderr_debug=args.debug)}", file=sys.stderr)
 
     result = hybrid_search(

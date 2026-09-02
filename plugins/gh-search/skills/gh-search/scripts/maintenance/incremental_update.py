@@ -24,11 +24,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-sys.path.insert(0, str(Path(__file__).parent))
-from fetch_repos import RepoFetcher
-from github_client import GitHubClient
-from sqlite_store import connect, find_changed_repos
-from build_index import EmbedError, build_index
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from data.fetch_repos import RepoFetcher
+from _common.github_client import GitHubClient
+from _common.sqlite_store import connect, find_changed_repos
+from pipeline.build_index import EmbedError, build_index
 
 
 class IncrementalUpdate:

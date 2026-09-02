@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 QUERIES = [
     "聚合网盘文件管理",
@@ -40,13 +40,13 @@ QUERIES = [
 
 def load_bge_model():
     """加载本地 bge-m3 fp32 ONNX 模型。"""
-    from build_index import _get_local_model
+    from pipeline.build_index import _get_local_model
     return _get_local_model()
 
 
 def load_ark_client():
     """加载方舟 doubao 嵌入客户端。"""
-    from ark_client import ArkEmbed
+    from _common.ark_client import ArkEmbed
     api_key = os.environ.get("ARK_API_KEY", "")
     base_url = os.environ.get("ARK_BASE_URL", None)
     if not api_key:

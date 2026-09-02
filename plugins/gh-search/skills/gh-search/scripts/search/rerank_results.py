@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("rerank_results")
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 DEFAULT_MODEL = "qwen3-rerank"
 DEFAULT_TOP_N = 50
@@ -214,7 +214,7 @@ def main() -> None:
             datefmt="%H:%M:%S",
             stream=sys.stderr,
         )
-    from logsetup import setup as _setup_log
+    from _common.logsetup import setup as _setup_log
     print(f"[log] {_setup_log(log, stderr_debug=args.debug)}", file=sys.stderr)
 
     result = rerank(

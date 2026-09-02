@@ -13,8 +13,8 @@ from pathlib import Path
 import numpy as np
 
 SCRIPTS = Path(__file__).resolve().parent
-sys.path.insert(0, str(SCRIPTS))
-import sqlite_store as ss  # noqa: E402
+sys.path.insert(0, str(Path(__file__).parent.parent))
+import _common.sqlite_store as ss  # noqa: E402
 
 
 def main(npz_path: str) -> None:

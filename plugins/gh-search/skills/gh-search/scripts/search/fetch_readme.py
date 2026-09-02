@@ -18,8 +18,10 @@ import json
 import re
 import sys
 from typing import Any, Dict, Optional
+from pathlib import Path
 
-from github_client import GitHubClient
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from _common.github_client import GitHubClient
 
 DEFAULT_MAX_CHARS = 2000
 DEFAULT_KEEP_HEAD = 1200   # 保留 README 开头多少字符

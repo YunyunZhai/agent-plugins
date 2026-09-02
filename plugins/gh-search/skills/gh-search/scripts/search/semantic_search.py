@@ -32,8 +32,8 @@ from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("semantic_search")
 
-sys.path.insert(0, str(Path(__file__).parent))
-from sqlite_store import (
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from _common.sqlite_store import (
     EMBED_DIM,
     EMBED_MODEL,
     connect,
@@ -98,13 +98,13 @@ def embed_query(query: str, model: str = EMBED_MODEL, backend: str = "pinecone")
         return _dashscope_embed(query)
     if backend == "ark":
         try:
-            from ark_client import ArkEmbed
+            from _common.ark_client import ArkEmbed
             return ArkEmbed().embed([query])[0]
         except Exception as e:
             raise SemanticError(f"方舟 query 嵌入失败: {e}")
     if backend == "local":
         try:
-            from build_index import _get_local_model
+            from pipeline.build_index import _get_local_model
             v = _get_local_model().encode([query], normalize_embeddings=True,
                                           show_progress_bar=False)
             return v[0].tolist()
@@ -165,7 +165,7 @@ def fetch_live_stars(repo_ids: List[str], client: "GitHubClient") -> Dict[str, i
 def translate_to_english(query: str) -> Optional[str]:
     """LLM 把中文意图翻译成英文检索表达；失败返回 None（单路回退）。"""
     try:
-        from ark_client import ArkChat
+        from _common.ark_client import ArkChat
         out = ArkChat().chat(
             f"把下面的检索意图翻译成一句用于向量检索的英文描述，只输出英文本身:\n{query}",
             max_tokens=128,
@@ -362,8 +362,8 @@ def semantic_search(
 
     # 仅对最终 top_k 在线刷新实时 stars（展示精度；失败保留快照值）
     try:
-        sys.path.insert(0, str(Path(__file__).parent))
-        from github_client import GitHubClient
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from _common.github_client import GitHubClient
         client = GitHubClient()
         live = fetch_live_stars([c["full_name"] for c in out], client)
         for c in out:
@@ -415,7 +415,7 @@ def main():
         )
     for noisy in ("pydot", "sentence_transformers", "urllib3", "httpx"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
-    from logsetup import setup as _setup_log
+    from _common.logsetup import setup as _setup_log
     print(f"[log] {_setup_log(log, stderr_debug=args.debug)}", file=sys.stderr)
 
     star_weight = 0.0 if args.pure_semantic else args.star_weight

@@ -13,7 +13,7 @@ description: |
 开始前，检查 `gh` CLI 是否可用并已认证：
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/github_client.py
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/_common/github_client.py
 ```
 
 - 输出"已认证用户: <name>" → 继续
@@ -77,7 +77,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/github_client.py
 **通道2 语义召回**（若选定）：
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/semantic_search.py \
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/search/semantic_search.py \
   --query "<用户检索意图>" \
   --top-k 50 \
   --min-stars 100 \
@@ -106,7 +106,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/semantic_search.py \
 对 Step 2 的小集合调用富化脚本，批量获取成熟度指标并过滤：
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/enrich_metrics.py \
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/search/enrich_metrics.py \
   --input <step2.json> \
   --min-commits-30d 3 \
   --json
@@ -129,7 +129,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/enrich_metrics.py \
 仅当用户开启【深度语义匹配】开关时执行：
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/fetch_readme.py \
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/search/fetch_readme.py \
   --input <step3.json> \
   --max-chars 2000 \
   --json
@@ -142,7 +142,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/fetch_readme.py \
 对 Step 3 或 Step 4 的候选集调用百炼 `qwen3-rerank` 模型，按 query-document 相关性做精细化二次排序：
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/rerank_results.py \
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/search/rerank_results.py \
   --input <step3.json 或 step4.json> \
   --query "<用户检索意图>" \
   --top-n 30 \
@@ -212,22 +212,22 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/rerank_results.py \
 # 查询（生产姿势；后端必须与库的模型一致）
 # 需 DASHSCOPE_API_KEY + DASHSCOPE_BASE_URL
 GH_SEARCH_BACKEND=dashscope GH_SEARCH_DB=<插件data目录>/gh_search_qwen.db \
-  python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/semantic_search.py --query "..." --top-k 15
+  python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/search/semantic_search.py --query "..." --top-k 15
 
 # 全量重建（百炼 Batch，见 /tmp 管线说明；先导文件→提交→下载→回导）
 # 增量补嵌新仓库用 build_index.py --backend dashscope --db <qwen库>（需脚本侧 Batch 支持）
 
 # 星数快照刷新（混合排序的先验数据源，覆盖 ≥2000★，每周一次，约 40 分钟）
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/fetch_repos.py --sync-stars --db <v3库>
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/data/fetch_repos.py --sync-stars --db <v3库>
 
 # 增量补嵌新仓库（断点续传，自动跳过已有）
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/build_index.py --backend local --db <v3库>
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/pipeline/build_index.py --backend local --db <v3库>
 
 # 全量重建走 Kaggle GPU（60 条/s）：导出→T4 嵌入→回导，
-# 见 references/colab_gpu_embedding.md 与 scripts/import_gpu_vectors.py
+# 见 references/colab_gpu_embedding.md 与 scripts/pipeline/import_gpu_vectors.py
 
 # 每周增量抓取近 7 天新活跃仓库
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/incremental_update.py --mode week --since 7 --db <v3库>
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/maintenance/incremental_update.py --mode week --since 7 --db <v3库>
 ```
 
 排序机制：`score = 语义距离 − 0.03·log10(1+stars快照)`——深窗口 k=4000 召回 +
@@ -246,10 +246,10 @@ star 先验救回元数据稀疏的头部项目（alist 实测从全库第 1361 
 
 ```bash
 # Pinecone 后端（多账号轮换：PINECONE_EMBED_KEY=key1,key2）
-PINECONE_API_KEY=<key> python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/build_index.py
+PINECONE_API_KEY=<key> python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/pipeline/build_index.py
 # 方舟后端（--shard i:n 多 key 分片并行；注意 plan/coding 端点不同）
 ARK_API_KEY=<key> ARK_BASE_URL=<套餐端点> GH_SEARCH_EMBED_DIM=2048 \
-  python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/build_index.py --backend ark --shard 0:3
+  python3 ${CLAUDE_PLUGIN_ROOT}/skills/gh-search/scripts/pipeline/build_index.py --backend ark --shard 0:3
 ```
 </details>
 

@@ -16,3 +16,7 @@ env/
 .DS_Store
 *.log
 
+.agents
+.claude
+.commandcode
+.opencode
