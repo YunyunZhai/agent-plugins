@@ -257,3 +257,55 @@ python3 scripts/maintenance/incremental_update.py --mode month --since 30 \
 - **过滤阈值**：可通过脚本参数调整（`--min-stars`、`--min-commits-30d` 等）
 - **超时**：`GH_SEARCH_TIMEOUT` 环境变量（秒，默认 60）
 - **嵌入**：`--backend local`（默认生产路径，无需密钥）；`--backend pinecone` 需 `PINECONE_API_KEY`
+
+## 测试
+
+端到端测试通过真实 uvicorn 子进程启动 REST 服务，用 `httpx` 驱动 HTTP 断言，覆盖 `/health`、`/search`（keyword/semantic/hybrid 与 enrich/readme/rerank 参数）、`/billing/summary` 与非法参数校验。
+
+### 依赖安装
+
+```bash
+pip install pytest httpx
+# 服务本身依赖 fastapi / uvicorn / pydantic / pyyaml，见「REST 服务」
+```
+
+### 运行
+
+```bash
+cd gh-search
+gh auth login                      # 一次性，确保 GitHub 认证可用
+python3 -m pytest tests/test_rest_e2e.py -v
+```
+
+### 环境变量配置清单
+
+基础场景（keyword/hybrid/health/billing）无需任何 DASHSCOPE 变量即可跑通。语义通道与 rerank 真路径依赖 DASHSCOPE 凭据，这些变量**不经过 `config.yaml`**，由 `semantic_search.py` 与 `rerank_results.py` 直接读取，必须在启动测试的 shell 里 export。
+
+| 环境变量 | 用途 | 是否必需 | 示例 |
+|---------|------|---------|------|
+| `DASHSCOPE_API_KEY` | 百炼 API Key | 语义通道（dashscope）与 rerank 真路径必需；缺失时测试 skip | `export DASHSCOPE_API_KEY="sk-..."` |
+| `DASHSCOPE_BASE_URL` | 百炼嵌入 API 端点（代码追加 `/embeddings`） | 语义通道（dashscope）必需 | 百炼 OpenAI 兼容嵌入端点 |
+| `DASHSCOPE_RERANK_URL` | rerank API 端点（代码追加 `/compatible-api/v1/reranks`） | rerank 真路径必需 | `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com` |
+| `DASHSCOPE_MODEL` | 百炼嵌入模型 | 可选 | 默认 `qwen3.7-text-embedding` |
+| `GH_SEARCH_BACKEND` | 查询嵌入后端 | 语义通道用 dashscope 时必需 | `export GH_SEARCH_BACKEND=dashscope` |
+| `GH_SEARCH_DB` | 语义 sqlite 库路径 | 语义通道用 qwen 库时必需 | `export GH_SEARCH_DB=gh-search/data/gh_search_qwen.db` |
+| `GH_SEARCH_EMBED_DIM` | 向量维度 | 可选（qwen 默认 1024 无需改） | `1024` |
+| `GH_TOKEN` / `GITHUB_TOKEN` | 显式 GitHub token | 可选；不设则用 `gh` CLI 已认证凭据 | `export GH_TOKEN="ghp_..."` |
+| `GH_SEARCH_TIMEOUT` | GitHub API 单次超时（秒） | 可选 | 默认 `60` |
+| `PINECONE_API_KEY` | Pinecone 嵌入 | 仅 pinecone 后端需要，dashscope 路径不需要 | — |
+
+> `DASHSCOPE_BASE_URL`（嵌入端点）与 `DASHSCOPE_RERANK_URL`（rerank 端点）是**不同端点**，不要混用。测试报告只记录「已配置/未配置」，不回显密钥明文。
+
+### 跑通 dashscope 语义 + rerank 真路径
+
+```bash
+cd gh-search
+export DASHSCOPE_API_KEY="sk-..."
+export DASHSCOPE_BASE_URL="https://<embedding-base>"
+export DASHSCOPE_RERANK_URL="https://<WorkspaceId>.cn-beijing.maas.aliyuncs.com"
+export GH_SEARCH_BACKEND=dashscope
+export GH_SEARCH_DB=gh-search/data/gh_search_qwen.db
+python3 -m pytest tests/test_rest_e2e.py -v
+```
+
+测试结果记录见 `references/e2e-test-report.md`。
