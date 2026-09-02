@@ -1,10 +1,14 @@
 # gh-search
 
-GitHub 智能开源项目搜索插件。根据用户的语义检索意图（如"找成熟活跃的 Python 网络安全开源库"），通过 **4 步过滤管线**从 GitHub 召回并精选高赞开源项目，最后由大模型打分推荐。
+GitHub 智能开源项目搜索插件。根据用户的自然语言检索意图（如"找成熟活跃的 Python 网络安全开源库"），通过 **4 步过滤管线**从 GitHub 召回并精选高赞开源项目，最后由大模型打分推荐。
 
-## 触发短语
+> 本文件同时面向**最终用户**（下面「用户使用说明」）与**开发者**（「工作原理」及其后章节）。技能行为细节以 `SKILL.md` 为准。
 
-以下场景会触发 gh-search 技能：
+## 用户使用说明
+
+### 触发方式
+
+在对话中直接表达你的检索需求即可触发，例如：
 
 - "找开源项目"
 - "推荐一个开源库"
@@ -13,6 +17,45 @@ GitHub 智能开源项目搜索插件。根据用户的语义检索意图（如"
 - "找高赞的 XX 项目"
 - "哪个开源项目适合做 XX"
 - "找一个启动快、资源占用低的编码智能体"
+
+### 提问技巧
+
+描述需求时，尽量带上这几个维度，召回会更精准：
+
+| 维度 | 例子 |
+|------|------|
+| 目标语言 | "Python 安全扫描库"、"Rust 高性能 HTTP 框架" |
+| 成熟度/活跃度 | "成熟活跃"、"高赞"、"维护中" |
+| 领域/特质关键词 | "低延迟"、"资源占用低"、"多端同步"、"WebDAV" |
+| 使用场景 | "适合做笔记"、"适合内网部署" |
+
+好的提问："找一个成熟活跃的 Go 语言网盘/文件管理项目，支持 WebDAV。"
+较差的提问："有什么好项目？"（信息太少，只能泛泛推荐）
+
+### 三种搜索通道
+
+| 通道 | 适用场景 | 说明 |
+|------|----------|------|
+| 关键词 | 有明确仓库名/语言/关键词 | 实时打 GitHub，结果精确 |
+| 语义 | 意图是模糊的"功能/特质"描述 | 本地向量索引，能召回"描述不含关键词但语义相关"的项目 |
+| 并行 | 两者都不确定，或想都试 | 关键词 + 语义 union，兼顾实时性与语义 |
+
+通道选择由技能根据你的意图自动决定；语义/并行通道依赖本地索引，索引未构建时自动回退关键词通道，不影响基本使用。
+
+### 常见示例
+
+- "找一个启动快、资源占用低的编码智能体" → 语义/并行通道，匹配特质描述
+- "找成熟活跃的 Python 安全漏洞扫描库" → 关键词/并行，语言 + 领域 + 成熟度都明确
+- "GitHub 上有没有 alist 的替代品" → 关键词，含明确仓库名
+
+### FAQ 与已知限制
+
+- **需要联网和 GitHub 授权吗？** 基础功能需要已认证的 GitHub CLI（`gh auth login`）；语义通道还需本地向量索引。
+- **结果为什么有时不精准？** 语义通道对 `name/description/topics` 做向量匹配，描述太短或太宽的项目可能被 star 先验或关键词兜底；README 双通道只覆盖约 7%（stars≥2000）的仓库。
+- **通道选择是自动的吗？** 是，技能根据意图自动决定，但你也可以明确要求"都试一下"。
+- **深度模式是什么？** 可选拉取候选项目 README 片段做语义增强，默认关闭以省 token 与网络开销，每次会话会询问是否开启。
+
+> 以上通道选择与限制为经验性说明，非正式评测结论，详见 `references/testing-evaluation.md`。
 
 ## 工作原理（4 步过滤管线）
 
@@ -76,7 +119,7 @@ is:public fork:false archived:false stars:>200 pushed:>=<最近180天>  [languag
 |------|--------|------|
 | 1. 关键词 | GitHub GraphQL search（在线实时） | `search_repos.py` |
 | 2. 语义 | 本地 sqlite-vec 索引（name/desc/topics 向量） | `semantic_search.py` |
-| 3. 并行 | 通道1 + 通道2 union | 两者各跑后合并 |
+| 3. 并行 | 通道1 + 通道2 union | `hybrid_search.py` |
 
 通道2/3 依赖本地索引（见"索引维护"）。索引未构建时自动回退通道1。
 
@@ -110,6 +153,10 @@ python3 scripts/search/search_repos.py \
 python3 scripts/search/semantic_search.py \
   --query "启动快的编码智能体" --top-k 50 --json
 
+# 通道3 并行召回（关键词 + 语义 union）
+python3 scripts/search/hybrid_search.py \
+  --query "启动快的编码智能体" --top-k 50 --backend local --json
+
 # Step3：成熟度指标过滤
 python3 scripts/search/enrich_metrics.py \
   --input step2.json --json
@@ -117,7 +164,66 @@ python3 scripts/search/enrich_metrics.py \
 # Step4：深度模式 README 片段
 python3 scripts/search/fetch_readme.py \
   --input step3.json --json
+
+# Step4.5：Rerank 精排（需 DASHSCOPE_API_KEY + DASHSCOPE_RERANK_URL）
+python3 scripts/search/rerank_results.py \
+  --input step3.json --query "启动快的编码智能体" --top-n 30 --json
 ```
+
+## REST 服务
+
+插件还提供一个 FastAPI 封装，把上面的脚本以 HTTP 接口暴露（无 LLM 环节，只跑确定性脚本）。
+
+### 启动
+
+```bash
+# 1. 准备配置（可省略，环境变量可覆盖）
+cp config.yaml.example config.yaml
+
+# 2. 安装依赖
+pip install fastapi uvicorn pyyaml pydantic sqlite-vec
+
+# 3. 启动（在 gh-search/ 目录下）
+uvicorn service.main:app --host 0.0.0.0 --port 8000
+```
+
+配置项见 `config.yaml.example`：`github.token`、`embedding.backend`/`db_path`、`server.host`/`port`、`billing.db_path`。也支持环境变量覆盖：`GH_TOKEN`、`GH_SEARCH_BACKEND`、`GH_SEARCH_DB`、`GH_SEARCH_TIMEOUT`、`GH_SEARCH_EMBED_DIM`。
+
+### 接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/health` | 健康检查：DB 连通性 + repo/vector 计数 |
+| POST | `/api/v1/search` | 搜索：按 channel 执行管线，可选 enrich/readme/rerank |
+| GET | `/api/v1/billing/summary` | 用量汇总：`user_id` + `period`(YYYY-MM) |
+
+### 使用示例
+
+```bash
+# 关键词搜索
+curl -X POST http://localhost:8000/api/v1/search \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: alice" \
+  -d '{"query": "python 安全扫描", "channel": "keyword"}'
+
+# 语义搜索（依赖本地索引与 embedding.backend 配置）
+curl -X POST http://localhost:8000/api/v1/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "启动快的编码智能体", "channel": "semantic", "top_k": 20}'
+
+# 并行搜索 + 全流程（成熟度过滤 + README + rerank）
+curl -X POST http://localhost:8000/api/v1/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "多端同步网盘", "channel": "hybrid", "enrich": true, "readme": true, "rerank": true}'
+
+# 健康检查
+curl http://localhost:8000/api/v1/health
+
+# 用量查询
+curl "http://localhost:8000/api/v1/billing/summary?user_id=alice&period=2026-09"
+```
+
+搜索请求体字段：`query`（必填）、`channel`（keyword/semantic/hybrid，默认 keyword）、`language`、`min_stars`（默认 200）、`top_k`（默认 50）、`star_weight`（默认 0.03）、`enrich`、`readme`、`rerank`。
 
 ## 索引维护（语义通道数据源）
 
