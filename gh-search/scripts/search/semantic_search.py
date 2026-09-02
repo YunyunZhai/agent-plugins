@@ -50,8 +50,20 @@ DEFAULT_STAR_WEIGHT = 0.03   # 混合排序: 每 10 倍 star 抵扣 0.03 个语�
                              #  0.08 会放行 mega-list 挤掉真相关小项目)
 
 DASHSCOPE_MODEL = os.environ.get("DASHSCOPE_MODEL", "qwen3.7-text-embedding")
+ARK_MODEL = os.environ.get("ARK_EMBED_MODEL", "doubao-embedding-vision")
 DASHSCOPE_INSTRUCT = ("Given a web search query, retrieve relevant passages "
                       "that answer the query\nQuery: {}")
+
+
+def effective_embed_model(backend: str, model: str) -> str:
+    """返回当前 backend 实际使用的嵌入模型名（日志/诊断用）。"""
+    if backend == "dashscope":
+        return DASHSCOPE_MODEL
+    if backend == "ark":
+        return ARK_MODEL
+    if backend == "local":
+        return "BAAI-bge-m3"
+    return model
 
 
 class SemanticError(RuntimeError):
@@ -222,7 +234,8 @@ def semantic_search(
         readme_count = count_readme_vectors(conn)
     except Exception:
         pass
-    log.debug("DB connected: %s  embed_model=%s  dim=%d", db_path or "(default)", EMBED_MODEL, EMBED_DIM)
+    log.debug("DB connected: %s  embed_model=%s  dim=%d", db_path or "(default)",
+              effective_embed_model(backend, model), EMBED_DIM)
     log.debug("DB stats: repo_vectors=%d  repo_readme_vectors=%d", repo_count, readme_count)
 
     t0 = time.monotonic()
