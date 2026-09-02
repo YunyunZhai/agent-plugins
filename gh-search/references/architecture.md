@@ -16,7 +16,7 @@ flowchart LR
     GH[GitHub GraphQL / REST]
     DB[(本地 sqlite<br/>+ sqlite-vec 索引)]
     Embed[嵌入后端<br/>local bge-m3 / ark / dashscope / pinecone]
-    Rerank[百炼 qwen3-rerank]
+    Rerank[百炼 qwen3.7-text-rerank]
     Kaggle[Kaggle T4<br/>批量嵌入]
 
     Agent -->|关键词/语义/混合| Plugin
@@ -91,7 +91,7 @@ search_repos.py (Step1+2)  →  enrich_metrics.py (Step3)  →  fetch_readme.py 
 | `search/search_repos.py` | Step1 GraphQL 召回 + Step2 硬过滤 | `--query`/`--group`、`--language`、`--min-stars`(200)、`--max-recalls`(400)、`--stale-days`(180) |
 | `search/enrich_metrics.py` | Step3 成熟度指标（30天 commit + 合并 PR）单次批量 GraphQL | `--input`、`--min-commits-30d`(3) |
 | `search/fetch_readme.py` | Step4 深度模式 README 片段（head+tail 截断） | `--input`、`--max-chars`(2000)、`--head`(1200)、`--tail`(300) |
-| `search/rerank_results.py` | Step4.5 百炼 qwen3-rerank 精排（缺 key 优雅降级） | `--input`、`--query`、`--top-n`(50) |
+| `search/rerank_results.py` | Step4.5 百炼 qwen3.7-text-rerank 精排（缺 key 优雅降级） | `--input`、`--query`、`--top-n`(50) |
 
 关键设计：
 - Step1 用 `fork:false` 而非 `not:fork`（GraphQL 陷阱，后者静默返回 0）。

@@ -13,7 +13,7 @@
 | GitHub CLI 认证 | 已登录（`gh auth status` 通过） |
 | `DASHSCOPE_API_KEY` | 已配置（不回显明文） |
 | `DASHSCOPE_BASE_URL` | 已配置为 `.../compatible-mode/v1`（embedding 端点，实测 200） |
-| `DASHSCOPE_RERANK_URL` | 已配置工作空间基地址；rerank 受配额限制（见下） |
+| `DASHSCOPE_RERANK_URL` | 已配置工作空间基地址（代码 append `/compatible-api/v1/reranks`） |
 | 语义库 | `data/gh_search_qwen.db`（fixture 通过 `GH_SEARCH_DB` 注入） |
 | 语义后端 | `dashscope`（fixture 通过 `GH_SEARCH_BACKEND` 注入） |
 
@@ -32,7 +32,7 @@ python3 -m pytest tests/test_rest_e2e.py -v
 | 跳过 | 0 |
 | 失败 | 0 |
 
-**执行时长**：约 75.92s（配置 DASHSCOPE 凭据后的完整执行）。
+**执行时长**：约 89.54s（配置 DASHSCOPE 凭据后的完整执行，rerank 真路径已修复）。
 
 ## 逐用例结果
 
@@ -42,7 +42,7 @@ python3 -m pytest tests/test_rest_e2e.py -v
 | `test_keyword_search` | PASSED | `channel=keyword` 返回 200，含 `candidates_list` |
 | `test_semantic_search` | PASSED | `channel=semantic` 返回 200，含 `candidates_list`（embedding 真实调用，`compatible-mode/v1/embeddings` 返回 200） |
 | `test_hybrid_search` | PASSED | `channel=hybrid` 返回 200，含 `candidates_list`、`channel=hybrid` |
-| `test_full_pipeline` | PASSED | `enrich/readme/rerank=true` 时 `pipeline_steps` 含 `recall(keyword)`、`enrich`、`readme`、`rerank` |
+| `test_full_pipeline` | PASSED | `enrich/readme/rerank=true` 时 `pipeline_steps` 含 `recall(keyword)`、`enrich`、`readme`、`rerank`，且候选含 `_rerank_score`（真路径） |
 | `test_default_pipeline` | PASSED | 默认参数 `pipeline_steps` 仅含 `recall(keyword)` |
 | `test_billing_summary` | PASSED | 搜索后按 `user_id`+`period` 汇总 `total_calls > 0` |
 | `test_invalid_channel` | PASSED | `channel=invalid` 返回 422 |
@@ -70,22 +70,21 @@ python3 -m pytest tests/test_rest_e2e.py -v
 
 搜索后 `GET /api/v1/billing/summary` 返回 200，对应 `user_id` 的 `total_calls > 0`，证明 `service/billing.py` 的 `record_call` 正确写入 `data/billing.db`。
 
-### 降级路径
+### 真路径与降级
 
 - **语义通道**：配置 `DASHSCOPE_BASE_URL=.../compatible-mode/v1` 后真实跑通（embedding 端点返回 200）。
-- **rerank**：`test_full_pipeline` 中 `rerank=true`，但 `DASHSCOPE_RERANK_URL` 对应的 rerank 端点返回 `403 AllocationQuota.FreeTierOnly`（免费额度耗尽），`rerank_results.py` 走优雅降级（保留原始顺序，`pipeline_steps` 仍含 `rerank`），未产生 `_rerank_score`。需充值或关闭百炼「仅免费额度」模式后才能验证 rerank 真路径。
+- **rerank**：`test_full_pipeline` 中 `rerank=true`，使用 `qwen3.7-text-rerank` 模型，候选真实产出 `_rerank_score`（真路径验证通过）。
 
-## 端点实测结论
+## 端点与修复结论
 
-| 端点 | 结果 |
+| 项 | 结果 |
 |------|------|
 | `DASHSCOPE_BASE_URL=.../compatible-mode/v1` + `/embeddings` | ✅ 200，语义通道真实可用 |
-| `DASHSCOPE_BASE_URL=.../compatible-mode/v1` + `/rerank`、`/reranks`、`/rerankers` | ❌ 404，此 base 下无 rerank 路由 |
-| `rerank_results.py` 拼出的 `<workspace>/compatible-api/v1/reranks` | ⚠️ 403 `AllocationQuota.FreeTierOnly`，路由存在但被配额拦截 |
-| 用户提供原生 rerank 路径 `.../api/v1/services/rerank/text-rerank/text-rerank` | ⚠️ 403 同一配额错误 |
-
-**结论**：`DASHSCOPE_RERANK_URL` 应填工作空间基地址（代码会 append `/compatible-api/v1/reranks`），端点格式正确；当前失败仅因免费额度耗尽，非 URL 配置错误。
+| `DASHSCOPE_RERANK_URL=<workspace>` + `/compatible-api/v1/reranks`（代码 append） | ✅ 200，`qwen3.7-text-rerank` 模型可用 |
+| 修复项 | rerank 模型名 `qwen3-rerank` → `qwen3.7-text-rerank` |
+| 修复项 | `rerank()` 补充读取 `DASHSCOPE_API_KEY`/`DASHSCOPE_RERANK_URL` 环境变量（此前不读，导致永远走降级） |
+| 修复项 | `_build_document` 截断超长 description（`MAX_DESC_CHARS=350`），避免单条 document 超 50000 触发 `InvalidParameter` |
 
 ## 待补测项
 
-- rerank 真路径（产生 `_rerank_score`）：需在百炼控制台充值或关闭「仅免费额度」模式后重跑 `test_full_pipeline`，并额外断言候选含 `_rerank_score`。
+- rerank 数值基准（nDCG/MRR）仍未做；当前仅验证端点可达、`_rerank_score` 正常产出。

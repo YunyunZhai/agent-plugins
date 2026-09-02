@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-第 4.5 步（可选）：Rerank 精排 —— 调用百炼 qwen3-rerank 模型对候选项目做精细化二次排序。
+第 4.5 步（可选）：Rerank 精排 —— 调用百炼 qwen3.7-text-rerank 模型对候选项目做精细化二次排序。
 
 在 Step 3（成熟度指标）或 Step 4（README 增强）之后、LLM 最终排序之前执行。
 对候选集按 query-document 相关性重新排序，输出带 _rerank_score 的结果。
@@ -21,6 +21,7 @@
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -30,7 +31,7 @@ log = logging.getLogger("rerank_results")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-DEFAULT_MODEL = "qwen3-rerank"
+DEFAULT_MODEL = "qwen3.7-text-rerank"
 DEFAULT_TOP_N = 50
 BATCH_SIZE = 100
 MAX_RETRIES = 3
@@ -41,10 +42,21 @@ class RerankError(RuntimeError):
     """Rerank 失败"""
 
 
+# GitHub 网页端 description 字段硬性上限；超过此长度的为 API 绕过写入的垃圾内容，
+# 与 _common/sqlite_store.py 的 MAX_DESC_CHARS 保持一致，避免超长文本撑爆 rerank 输入。
+MAX_DESC_CHARS = 350
+
+
 def _build_document(repo: Dict[str, Any]) -> str:
-    """将候选仓库记录拼接为 reranker 输入文档文本。"""
+    """将候选仓库记录拼接为 reranker 输入文档文本。
+
+    对 description 做硬截断：单条 document 不能超过 rerank 服务上限（实测
+    `qwen3.7-text-rerank` 单条超 50000 会报 InvalidParameter）。topics 保留前 10 个。
+    """
     name = repo.get("full_name", "")
     desc = (repo.get("description") or "").strip()
+    if len(desc) > MAX_DESC_CHARS:
+        desc = desc[:MAX_DESC_CHARS]
     topics = repo.get("topics") or []
     if isinstance(topics, str):
         try:
@@ -121,9 +133,9 @@ def rerank(
 
     log.debug("loaded %d candidates from %s", len(candidates), input_path)
 
-    # 检查环境变量
-    api_key = api_key or ""
-    endpoint = endpoint or ""
+    # 检查环境变量（显式参数优先，其次读环境变量）
+    api_key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
+    endpoint = endpoint or os.environ.get("DASHSCOPE_RERANK_URL", "")
     if not api_key or not endpoint:
         log.debug("missing DASHSCOPE_API_KEY or DASHSCOPE_RERANK_URL, skip rerank")
         print("⚠️ 未配置 DASHSCOPE_API_KEY / DASHSCOPE_RERANK_URL，跳过 rerank",

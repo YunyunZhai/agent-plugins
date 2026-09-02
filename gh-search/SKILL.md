@@ -139,7 +139,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/search/fetch_readme.py \
 
 ### Step 4.5 — Rerank 精排（可选，需 DASHSCOPE_API_KEY + DASHSCOPE_RERANK_URL）
 
-对 Step 3 或 Step 4 的候选集调用百炼 `qwen3-rerank` 模型，按 query-document 相关性做精细化二次排序：
+对 Step 3 或 Step 4 的候选集调用百炼 `qwen3.7-text-rerank` 模型，按 query-document 相关性做精细化二次排序：
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/search/rerank_results.py \

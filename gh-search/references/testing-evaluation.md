@@ -123,7 +123,7 @@
 
 | 项 | 状态 | 说明 |
 |----|------|------|
-| qwen3-rerank 精排 | ⚠️ 仅验证优雅降级 | 日志显示「missing DASHSCOPE_API_KEY or DASHSCOPE_RERANK_URL, skip rerank」，未产生 rerank score，未做数值基准 |
+| qwen3.7-text-rerank 精排 | ⚠️ 仅验证端点可达与优雅降级 | 实测 `qwen3.7-text-rerank` 在 `<workspace>/compatible-api/v1/reranks` 返回 200；但 rerank 数值基准仍未做，`_rerank_score` 排序质量待评测 |
 | 正式标注评测集 | ❌ 无 | 无 query→gold-repo 标注集，无 nDCG/MRR/Recall@k |
 | hybrid 大样本对比 | ⚠️ 未做 | 仅小探针验证（关键词 0 召回场景），无大样本 hybrid vs semantic 精度/召回对比 |
 | dashscope 后端 | ⚠️ 未实测 | 代码已实现（qwen3.7-text-embedding），无对应生产日志 |

@@ -89,11 +89,21 @@ def test_full_pipeline(server_url):
         timeout=180.0,
     )
     assert r.status_code == 200
-    steps = r.json()["pipeline_steps"]
+    body = r.json()
+    steps = body["pipeline_steps"]
     assert "recall(keyword)" in steps
     assert "enrich" in steps
     assert "readme" in steps
     assert "rerank" in steps
+
+    # rerank 真路径：若凭据齐全，候选应带 _rerank_score
+    if _dashscope_ready() and os.environ.get("DASHSCOPE_RERANK_URL"):
+        scores = [
+            c.get("_rerank_score")
+            for c in body["candidates_list"]
+            if c.get("_rerank_score") is not None
+        ]
+        assert scores, "rerank 凭据已配置但未产出 _rerank_score"
 
 
 def test_default_pipeline(server_url):
