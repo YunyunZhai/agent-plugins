@@ -70,6 +70,17 @@ class SemanticError(RuntimeError):
     """语义召回失败"""
 
 
+def _median(values: List[int]) -> float:
+    """简单中位数（logging 统计用）。"""
+    if not values:
+        return 0.0
+    s = sorted(values)
+    n = len(s)
+    if n % 2 == 1:
+        return float(s[n // 2])
+    return (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
 def hybrid_score(distance: float, stars: int, star_weight: float) -> float:
     """混合分 = 语义距离 − star 先验（越小越好）。
 
@@ -93,14 +104,20 @@ def _dashscope_embed(query: str) -> List[float]:
     last = None
     for attempt in range(6):
         try:
+            t_req = time.monotonic()
             r = requests.post(base + "/embeddings", headers=headers, json=body, timeout=60)
             r.raise_for_status()
+            log.debug("dashscope embed attempt %d ok in %.2fs", attempt + 1,
+                      time.monotonic() - t_req)
             return r.json()["data"][0]["embedding"]
         except Exception as e:
             last = e
             if attempt == 5:
                 break
-            time.sleep(5 * (attempt + 1))
+            delay = 5 * (attempt + 1)
+            log.warning("dashscope embed attempt %d/6 failed, retrying in %.0fs: %s",
+                        attempt + 1, delay, e)
+            time.sleep(delay)
     raise SemanticError(f"百炼 query 嵌入失败: {last}")
 
 
@@ -184,7 +201,7 @@ def translate_to_english(query: str) -> Optional[str]:
         ).strip()
         return out or None
     except Exception as e:  # noqa: BLE001
-        print(f"⚠️ 英文翻译失败，单中文查询回退: {e}", file=sys.stderr)
+        log.warning("EN translation failed, falling back to Chinese-only query: %s", e)
         return None
 
 
@@ -226,6 +243,7 @@ def semantic_search(
     log.debug("query: %s", query)
     log.debug("params: top_k=%d min_stars=%d star_weight=%.3f exclude_fork=%s exclude_archived=%s backend=%s",
               top_k, min_stars, star_weight, exclude_fork, exclude_archived, backend)
+    t_start = time.monotonic()
 
     conn = connect(db_path)
     repo_count = count_vectors(conn)
@@ -279,7 +297,12 @@ def semantic_search(
             merged = {h["id"]: h["distance"] for h in hl}
             source = {h["id"]: "repo" for h in hl}
             repo_only = len(merged)
-            for h in search_knn(conn, qvec, k=knn_k, table="repo_readme_vectors"):
+            readme_hits = search_knn(conn, qvec, k=knn_k, table="repo_readme_vectors")
+            log.debug("  README kNN: %d hits (top1: %s dist=%.4f)",
+                      len(readme_hits),
+                      readme_hits[0]["id"] if readme_hits else "-",
+                      readme_hits[0]["distance"] if readme_hits else 0)
+            for h in readme_hits:
                 rid, d = h["id"], h["distance"]
                 if rid not in merged or d < merged[rid]:
                     merged[rid] = d
@@ -366,6 +389,22 @@ def semantic_search(
         out.sort(key=lambda c: c.get("_semantic_distance", 1e9))
         note = "纯语义排序（距离升序），star 仅作过滤不作排序（避免 star 淹没语义差异）。"
     log.debug("before top_k truncate: %d candidates (min_stars filtered: %d)", len(out), skipped_stars)
+    if star_weight > 0 and out:
+        log.debug("  star-weight breakdown: score = dist - %.3f*log10(1+stars)",
+                  star_weight)
+        for c in out[:5]:
+            dist = c["_semantic_distance"]
+            stars = c["stars"]
+            penalty = star_weight * math.log10(1 + max(stars, 0))
+            log.debug("    %s dist=%.4f stars=%d log10=%.4f penalty=%.4f score=%.4f",
+                      c["full_name"], dist, stars, math.log10(1 + max(stars, 0)),
+                      penalty, c["_score"])
+        scores = [c.get("_score", 0) for c in out]
+        stars_list = [c["stars"] for c in out]
+        log.debug("  score stats: count=%d min=%.4f max=%.4f avg=%.4f | stars min=%d median=%d max=%d",
+                  len(scores), min(scores), max(scores),
+                  sum(scores) / len(scores),
+                  min(stars_list), _median(stars_list), max(stars_list))
     for i, c in enumerate(out[:5]):
         score = c.get("_score")
         score_str = f" score={score}" if score is not None else ""
@@ -384,7 +423,10 @@ def semantic_search(
                 c["stars"] = live[c["full_name"]]
                 c["_stars_live"] = True
     except Exception as e:  # noqa: BLE001
-        print(f"⚠️ 实时 stars 刷新失败，使用快照值: {e}", file=sys.stderr)
+        log.warning("live stars refresh failed, using snapshot: %s", e)
+
+    log.debug("semantic_search done: query=%r recalled=%d final=%d total=%.2fs",
+              query, recalled, len(out), time.monotonic() - t_start)
 
     return {
         "query": query,

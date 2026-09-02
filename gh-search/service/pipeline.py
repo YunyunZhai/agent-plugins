@@ -1,5 +1,6 @@
 """管线编排：根据 channel 参数调用搜索核心函数，串联 enrich/readme/rerank 步骤。"""
 
+import logging
 import sys
 import time
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Any, Dict, List, Optional
 # 确保 scripts 目录在 path 中
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(_SCRIPTS_DIR))
+
+log = logging.getLogger("gh-search.service.pipeline")
 
 
 def _keyword_search(
@@ -104,12 +107,12 @@ def run_pipeline(
     db_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """执行完整搜索管线，返回结构化结果。"""
-    t0 = time.time()
+    t0 = time.monotonic()
     pipeline_steps: List[str] = []
     elapsed: Dict[str, float] = {}
 
     # Step 1: 召回
-    t_recall = time.time()
+    t_recall = time.monotonic()
     if channel == "keyword":
         candidates = _keyword_search(query, language, min_stars, top_k)
     elif channel == "semantic":
@@ -119,30 +122,36 @@ def run_pipeline(
     else:
         raise ValueError(f"Unknown channel: {channel}")
     pipeline_steps.append(f"recall({channel})")
-    elapsed["recall"] = round(time.time() - t_recall, 3)
+    elapsed["recall"] = round(time.monotonic() - t_recall, 3)
+    log.info("recall: channel=%s candidates=%d elapsed=%.3fs", channel, len(candidates),
+             elapsed["recall"])
 
     # Step 2: 成熟度指标（可选）
     if do_enrich and candidates:
-        t_enrich = time.time()
+        t_enrich = time.monotonic()
+        before = len(candidates)
         candidates = _enrich_metrics(candidates)
+        elapsed["enrich"] = round(time.monotonic() - t_enrich, 3)
+        log.info("enrich: %d -> %d elapsed=%.3fs", before, len(candidates), elapsed["enrich"])
         pipeline_steps.append("enrich")
-        elapsed["enrich"] = round(time.time() - t_enrich, 3)
 
     # Step 3: README 片段（可选）
     if do_readme and candidates:
-        t_readme = time.time()
+        t_readme = time.monotonic()
         candidates = _fetch_readme(candidates)
+        elapsed["readme"] = round(time.monotonic() - t_readme, 3)
+        log.info("readme: %d candidates elapsed=%.3fs", len(candidates), elapsed["readme"])
         pipeline_steps.append("readme")
-        elapsed["readme"] = round(time.time() - t_readme, 3)
 
     # Step 4: Rerank（可选）
     if do_rerank and candidates:
-        t_rerank = time.time()
+        t_rerank = time.monotonic()
         candidates = _rerank(candidates, query, top_k)
+        elapsed["rerank"] = round(time.monotonic() - t_rerank, 3)
+        log.info("rerank: %d candidates elapsed=%.3fs", len(candidates), elapsed["rerank"])
         pipeline_steps.append("rerank")
-        elapsed["rerank"] = round(time.time() - t_rerank, 3)
 
-    elapsed["total"] = round(time.time() - t0, 3)
+    elapsed["total"] = round(time.monotonic() - t0, 3)
 
     return {
         "query": query,

@@ -96,14 +96,20 @@ def _call_rerank_api(
     last_err = None
     for attempt in range(MAX_RETRIES):
         try:
+            t_req = time.monotonic()
             r = requests.post(url, headers=headers, json=body, timeout=60)
             r.raise_for_status()
             data = r.json()
+            log.debug("rerank API attempt %d/%d ok in %.2fs (%d docs)",
+                      attempt + 1, MAX_RETRIES, time.monotonic() - t_req, len(documents))
             return data.get("results", [])
         except Exception as e:
             last_err = e
             if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY * (attempt + 1))
+                delay = RETRY_DELAY * (attempt + 1)
+                log.warning("rerank API attempt %d/%d failed, retrying in %.0fs: %s",
+                            attempt + 1, MAX_RETRIES, delay, e)
+                time.sleep(delay)
     raise RerankError(f"rerank API 调用失败（{MAX_RETRIES} 次重试后）: {last_err}")
 
 
@@ -184,11 +190,25 @@ def rerank(
                 batch_candidates[idx]["_rerank_score"] = round(score, 4)
         all_results.extend(batch_candidates)
 
+    # 重排前后的顺序变化对比（诊断重排是否有效移动）
+    rank_before = {c["full_name"]: i for i, c in enumerate(candidates)}
+
     # 按 rerank 分数降序排列
     all_results.sort(key=lambda c: c.get("_rerank_score", 0), reverse=True)
 
     # 截断到 top_n
     output = all_results[:top_n]
+
+    moves = []
+    for i, c in enumerate(output[:max(5, top_n)]):
+        before = rank_before.get(c["full_name"])
+        if before is None:
+            continue
+        delta = before - i  # 正=提前, 负=退后
+        marker = f"▲{delta}" if delta > 0 else (f"▼{-delta}" if delta < 0 else "=")
+        moves.append(f"{marker}{c['full_name']}")
+    if moves:
+        log.debug("rerank rank-moves (↓ up / ↑ down): %s", " ".join(moves))
 
     log.debug("rerank done: %d → %d (top_n=%d)", len(candidates), len(output), top_n)
     for i, c in enumerate(output[:5]):

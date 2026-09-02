@@ -9,6 +9,7 @@
     file     - 是否落盘 data/*.log
     console  - 是否输出 stderr
 """
+import contextvars
 import logging
 import os
 import sys
@@ -17,6 +18,25 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
+
+# ── request_id: 通过 contextvars 自动传递到所有下游 logger ──
+_request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
+
+
+def set_request_id(rid: str) -> None:
+    _request_id_var.set(rid)
+
+
+def get_request_id() -> str:
+    return _request_id_var.get()
+
+
+class _RequestIdFilter(logging.Filter):
+    """自动为每条 log record 注入 request_id 字段。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = get_request_id()
+        return True
 
 # <scripts>/_common/../.. → gh-search/，data 目录即索引库所在目录
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
@@ -77,19 +97,22 @@ def setup(
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     path = DATA_DIR / f"{log.name}.log"
+    _fmt = "%(asctime)s %(levelname)s [%(request_id)s] %(name)s %(message)s"
+    _req_filter = _RequestIdFilter()
     if file:
         fh = RotatingFileHandler(
             path, maxBytes=5 * 1024 * 1024, backupCount=2, encoding="utf-8"
         )
         fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter(
-            "%(asctime)s %(levelname)s %(message)s", datefmt="%m-%d %H:%M:%S"))
+        fh.setFormatter(logging.Formatter(_fmt, datefmt="%m-%d %H:%M:%S"))
+        fh.addFilter(_req_filter)
         log.addHandler(fh)
     if console:
         sh = logging.StreamHandler(sys.stderr)
         sh.setLevel(logging.DEBUG)
         sh.setFormatter(logging.Formatter(
-            "%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S"))
+            "%(asctime)s %(levelname)s [%(request_id)s] %(message)s", datefmt="%H:%M:%S"))
+        sh.addFilter(_req_filter)
         log.addHandler(sh)
     log.setLevel(_resolve_level(level))
     log.propagate = False
@@ -115,6 +138,8 @@ def configure_root_logging(config: Optional[dict] = None) -> None:
         return
     root._gh_search_configured = True
 
+    _fmt = "%(asctime)s %(levelname)s [%(request_id)s] %(name)s %(message)s"
+    _req_filter = _RequestIdFilter()
     if file_enabled:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         path = DATA_DIR / "gh-search.log"
@@ -122,13 +147,13 @@ def configure_root_logging(config: Optional[dict] = None) -> None:
             path, maxBytes=5 * 1024 * 1024, backupCount=2, encoding="utf-8"
         )
         fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter(
-            "%(asctime)s %(levelname)s %(name)s %(message)s",
-            datefmt="%m-%d %H:%M:%S"))
+        fh.setFormatter(logging.Formatter(_fmt, datefmt="%m-%d %H:%M:%S"))
+        fh.addFilter(_req_filter)
         root.addHandler(fh)
     if console_enabled:
         sh = logging.StreamHandler(sys.stderr)
         sh.setLevel(logging.DEBUG)
         sh.setFormatter(logging.Formatter(
-            "%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S"))
+            "%(asctime)s %(levelname)s [%(request_id)s] %(message)s", datefmt="%H:%M:%S"))
+        sh.addFilter(_req_filter)
         root.addHandler(sh)
