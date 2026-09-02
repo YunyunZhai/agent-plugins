@@ -275,8 +275,9 @@ def semantic_search(
               len(hit_lists[0]), time.monotonic() - t0,
               hit_lists[0][0]["id"] if hit_lists[0] else "-",
               hit_lists[0][0]["distance"] if hit_lists[0] else 0)
-    for i, h in enumerate(hit_lists[0][:5]):
-        log.debug("  repo channel #%d: %s dist=%.4f", i+1, h["id"], h["distance"])
+    for i, h in enumerate(hit_lists[0][:20]):
+        log.debug("  repo kNN #%d: %s dist=%.4f", i+1, h["id"], h["distance"])
+    repo_knn_top20 = {h["id"]: i+1 for i, h in enumerate(hit_lists[0][:20])}
     en_text = None
     if dual_query:
         en_text = translate_to_english(query)
@@ -291,6 +292,7 @@ def semantic_search(
     except Exception:
         has_readme = False
     log.debug("README vectors: %s", f"{count_readme_vectors(conn)} rows" if has_readme else "none")
+    merged_top20 = repo_knn_top20  # fallback if no README
     if has_readme:
         t0 = time.monotonic()
         def _with_readme(hl):
@@ -302,6 +304,8 @@ def semantic_search(
                       len(readme_hits),
                       readme_hits[0]["id"] if readme_hits else "-",
                       readme_hits[0]["distance"] if readme_hits else 0)
+            for i, h in enumerate(readme_hits[:20]):
+                log.debug("    README #%d: %s dist=%.4f", i+1, h["id"], h["distance"])
             for h in readme_hits:
                 rid, d = h["id"], h["distance"]
                 if rid not in merged or d < merged[rid]:
@@ -315,7 +319,11 @@ def semantic_search(
                            for i, d in merged.items()),
                           key=lambda x: x["distance"])
         hit_lists = [_with_readme(hl) for hl in hit_lists]
+        merged_top20 = {h["id"]: i+1 for i, h in enumerate(hit_lists[0][:20])}
         log.debug("README merge done in %.2fs", time.monotonic() - t0)
+        for i, h in enumerate(hit_lists[0][:20]):
+            log.debug("  merged #%d: %s dist=%.4f source=%s",
+                      i+1, h["id"], h["distance"], h.get("_source"))
 
     hits = _fuse_knn(hit_lists) if len(hit_lists) > 1 else hit_lists[0]
     log.debug("after fuse: %d hits", len(hits))
@@ -339,7 +347,7 @@ def semantic_search(
         candidates.append((repo, h["distance"], h.get("_source", "repo")))
     log.debug("candidates: recalled=%d, filtered(fork=%d, archived=%d), kept=%d",
               recalled, skipped_fork, skipped_archived, len(candidates))
-    for i, (repo, dist, src) in enumerate(candidates[:10]):
+    for i, (repo, dist, src) in enumerate(candidates[:20]):
         embed_text = (repo.get("embed_text") or "")[:120]
         readme_preview = (repo.get("readme_embed_text") or "")[:120]
         log.debug("  candidate #%d: %s dist=%.4f source=%s lang=%s",
@@ -392,7 +400,7 @@ def semantic_search(
     if star_weight > 0 and out:
         log.debug("  star-weight breakdown: score = dist - %.3f*log10(1+stars)",
                   star_weight)
-        for c in out[:5]:
+        for c in out[:20]:
             dist = c["_semantic_distance"]
             stars = c["stars"]
             penalty = star_weight * math.log10(1 + max(stars, 0))
@@ -405,11 +413,35 @@ def semantic_search(
                   len(scores), min(scores), max(scores),
                   sum(scores) / len(scores),
                   min(stars_list), _median(stars_list), max(stars_list))
-    for i, c in enumerate(out[:5]):
+    final_top = out[:min(20, len(out))]
+    for i, c in enumerate(final_top):
         score = c.get("_score")
         score_str = f" score={score}" if score is not None else ""
         log.debug("  final #%d: %s dist=%.4f stars=%d%s",
                   i+1, c["full_name"], c["_semantic_distance"], c["stars"], score_str)
+
+    # ── 各阶段召回对比表 ──
+    log.debug("")
+    log.debug("recall stage table (top %d):", len(final_top))
+    log.debug("  %-4s %-45s %-8s %-8s %-8s", "#", "repo", "kNN", "merged", "final")
+    log.debug("  %-4s %-45s %-8s %-8s %-8s", "----", "-"*45, "-----", "------", "-----")
+    for i, c in enumerate(final_top):
+        name = c["full_name"]
+        kNN_r = repo_knn_top20.get(name)
+        m_r   = merged_top20.get(name)
+        kNN_s = f"#{kNN_r}" if kNN_r else "-"
+        m_s   = f"#{m_r}"   if m_r   else "-"
+        log.debug("  %-4d %-45s %-8s %-8s %-8d", i+1, name, kNN_s, m_s, i+1)
+    final_names = {c["full_name"] for c in final_top}
+    dropped_from_repo_knn = [name for rank, name in sorted((v,k) for k,v in repo_knn_top20.items()) if name not in final_names]
+    dropped_from_merged   = [name for rank, name in sorted((v,k) for k,v in merged_top20.items())   if name not in final_names]
+    if dropped_from_repo_knn:
+        log.debug("  in repo_kNN top20 but dropped: %s", " ".join(dropped_from_repo_knn))
+    if dropped_from_merged:
+        log.debug("  in merged top20 but dropped:   %s", " ".join(dropped_from_merged))
+    new_from_readme = [name for name in final_names if name not in repo_knn_top20]
+    if new_from_readme:
+        log.debug("  NEW from README (not in repo_kNN top20): %s", " ".join(new_from_readme))
     out = out[:top_k]
 
     # 仅对最终 top_k 在线刷新实时 stars（展示精度；失败保留快照值）
