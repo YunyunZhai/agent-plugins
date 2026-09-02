@@ -257,6 +257,7 @@ python3 scripts/maintenance/incremental_update.py --mode month --since 30 \
 - **过滤阈值**：可通过脚本参数调整（`--min-stars`、`--min-commits-30d` 等）
 - **超时**：`GH_SEARCH_TIMEOUT` 环境变量（秒，默认 60）
 - **嵌入**：`--backend local`（默认生产路径，无需密钥）；`--backend pinecone` 需 `PINECONE_API_KEY`
+- **日志**：`config.yaml` 的 `logging` 段统一控制级别与去向：`logging.level`（debug/info/warning/error，默认 info）、`logging.file`（默认 true，落盘 `data/*.log`）、`logging.console`（默认 false，输出 stderr）。环境变量 `GH_SEARCH_LOG_LEVEL`、`GH_SEARCH_LOG_FILE`、`GH_SEARCH_LOG_CONSOLE` 可覆盖；脚本的 `--debug` 等价于 `level=debug` 且 `console=true`
 
 ## 测试
 

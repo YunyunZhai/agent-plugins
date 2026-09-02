@@ -24,6 +24,7 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
     config.setdefault("embedding", {})
     config.setdefault("server", {})
     config.setdefault("billing", {})
+    config.setdefault("logging", {})
 
     if os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"):
         config["github"]["token"] = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
@@ -35,6 +36,23 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
         config["embedding"]["db_path"] = os.environ["GH_SEARCH_DB"]
     if os.environ.get("GH_SEARCH_EMBED_DIM"):
         config["embedding"]["dim"] = int(os.environ["GH_SEARCH_EMBED_DIM"])
+
+    # 日志配置：级别 + 文件/console 开关，环境变量可覆盖
+    _DEFAULT_LOG_LEVEL = "info"
+    level = os.environ.get("GH_SEARCH_LOG_LEVEL", config["logging"].get("level", _DEFAULT_LOG_LEVEL))
+    level = str(level).lower()
+    if level not in ("debug", "info", "warning", "error"):
+        level = _DEFAULT_LOG_LEVEL
+    config["logging"]["level"] = level
+
+    def _as_bool(key: str, env_name: str, default: bool) -> bool:
+        raw = os.environ.get(env_name)
+        if raw is None:
+            return bool(config["logging"].get(key, default))
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+    config["logging"]["file"] = _as_bool("file", "GH_SEARCH_LOG_FILE", True)
+    config["logging"]["console"] = _as_bool("console", "GH_SEARCH_LOG_CONSOLE", False)
 
     return config
 

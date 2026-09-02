@@ -171,17 +171,14 @@ def main():
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
-    if args.debug:
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(asctime)s %(name)s %(message)s",
-            datefmt="%H:%M:%S",
-            stream=sys.stderr,
-        )
     for noisy in ("pydot", "sentence_transformers", "urllib3", "httpx"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
-    from _common.logsetup import setup as _setup_log
-    print(f"[log] {_setup_log(log, stderr_debug=args.debug)}", file=sys.stderr)
+    from _common.logsetup import load_logging_config, setup as _setup_log
+    log_cfg = load_logging_config()
+    if args.debug:
+        log_cfg["level"] = "debug"
+        log_cfg["console"] = True
+    print(f"[log] {_setup_log(log, **log_cfg)}", file=sys.stderr)
 
     result = hybrid_search(
         args.query, args.top_k, args.min_stars, args.language,

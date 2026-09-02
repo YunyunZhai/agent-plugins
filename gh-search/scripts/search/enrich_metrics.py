@@ -25,6 +25,7 @@
 
 import argparse
 import json
+import logging
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -32,6 +33,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from _common.github_client import GitHubClient
+
+log = logging.getLogger("enrich_metrics")
 
 DEFAULT_MIN_COMMITS_30D = 3
 DEFAULT_STALE_DAYS = 180
@@ -134,8 +137,7 @@ def enrich(client: GitHubClient, repos: List[Dict[str, Any]]) -> List[Dict[str, 
         batch = repos[i:i + BATCH_SIZE]
         enriched.extend(_query_batch(client, batch, since30))
         batches += 1
-    print(f"[gh] GraphQL 网络调用 {batches} 次，覆盖 {len(enriched)}/{len(repos)} 条",
-          file=sys.stderr)
+    log.info("GraphQL 网络调用 %d 次，覆盖 %d/%d 条", batches, len(enriched), len(repos))
     return enriched
 
 
@@ -183,7 +185,15 @@ def main() -> None:
     parser.add_argument("--min-commits-30d", type=int, default=DEFAULT_MIN_COMMITS_30D,
                         help=f"近30天 commit 阈值（默认 {DEFAULT_MIN_COMMITS_30D}）")
     parser.add_argument("--json", action="store_true", help="仅输出 JSON")
+    parser.add_argument("--debug", action="store_true", help="输出调试日志到 stderr")
     args = parser.parse_args()
+
+    from _common.logsetup import load_logging_config, setup as _setup_log
+    log_cfg = load_logging_config()
+    if args.debug:
+        log_cfg["level"] = "debug"
+        log_cfg["console"] = True
+    _setup_log(log, **log_cfg)
 
     repos = _load_repos(args.input, args.repos)
     if not repos:

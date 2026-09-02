@@ -30,6 +30,17 @@ app = FastAPI(
 
 config = get_config()
 
+# 初始化日志：服务端也遵循 config.yaml 的 logging 段
+import logging as _logging
+
+_SCRIPTS_DIR_FOR_LOG = Path(__file__).resolve().parent.parent / "scripts"
+if str(_SCRIPTS_DIR_FOR_LOG) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR_FOR_LOG))
+from _common.logsetup import configure_root_logging
+
+configure_root_logging(config.get("logging", {}))
+log = _logging.getLogger("gh-search.service")
+
 
 @app.get("/api/v1/health", response_model=HealthResponse)
 def health_check():
@@ -62,6 +73,7 @@ def search(
     """搜索端点：按 channel 执行搜索管线。"""
     user_id = x_user_id or "anonymous"
     t0 = __import__("time").time()
+    log.info("search start: user=%s channel=%s query=%r", user_id, req.channel.value, req.query)
 
     try:
         result = run_pipeline(
@@ -90,6 +102,7 @@ def search(
 
         return SearchResponse(**result)
     except Exception as e:
+        log.exception("search failed: user=%s channel=%s", user_id, req.channel.value)
         elapsed = __import__("time").time() - t0
         record_call(
             user_id=user_id,

@@ -15,6 +15,7 @@
 
 import argparse
 import json
+import logging
 import re
 import sys
 from typing import Any, Dict, Optional
@@ -22,6 +23,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from _common.github_client import GitHubClient
+
+log = logging.getLogger("fetch_readme")
 
 DEFAULT_MAX_CHARS = 2000
 DEFAULT_KEEP_HEAD = 1200   # 保留 README 开头多少字符
@@ -159,7 +162,15 @@ def main() -> None:
     parser.add_argument("--tail", type=int, default=DEFAULT_KEEP_TAIL,
                         help=f"保留末尾字符数（默认 {DEFAULT_KEEP_TAIL}）")
     parser.add_argument("--json", action="store_true", help="仅输出 JSON")
+    parser.add_argument("--debug", action="store_true", help="输出调试日志到 stderr")
     args = parser.parse_args()
+
+    from _common.logsetup import load_logging_config, setup as _setup_log
+    log_cfg = load_logging_config()
+    if args.debug:
+        log_cfg["level"] = "debug"
+        log_cfg["console"] = True
+    _setup_log(log, **log_cfg)
 
     repos = _load_repos(args.input, args.repos)
     if not repos:
@@ -169,6 +180,7 @@ def main() -> None:
     client = GitHubClient()
     enriched = enrich(client, repos, args.max_chars, args.head, args.tail)
     fetched = sum(1 for r in enriched if r.get("readme_snippet"))
+    log.info("README 拉取完成: 输入 %d 条，成功 %d 条", len(repos), fetched)
 
     result = {"input": len(repos), "readme_fetched": fetched, "results": enriched}
     if args.json:

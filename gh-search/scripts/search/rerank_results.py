@@ -219,15 +219,12 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true", help="输出调试日志到 stderr")
     args = parser.parse_args()
 
+    from _common.logsetup import load_logging_config, setup as _setup_log
+    log_cfg = load_logging_config()
     if args.debug:
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(asctime)s %(name)s %(message)s",
-            datefmt="%H:%M:%S",
-            stream=sys.stderr,
-        )
-    from _common.logsetup import setup as _setup_log
-    print(f"[log] {_setup_log(log, stderr_debug=args.debug)}", file=sys.stderr)
+        log_cfg["level"] = "debug"
+        log_cfg["console"] = True
+    print(f"[log] {_setup_log(log, **log_cfg)}", file=sys.stderr)
 
     result = rerank(
         args.input, args.query, args.top_n, args.model,

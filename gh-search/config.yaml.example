@@ -15,3 +15,8 @@ server:
 
 billing:
   db_path: "data/billing.db"   # 计费数据库路径
+
+logging:
+  level: info                  # debug / info / warning / error
+  file: true                   # 是否落盘 data/*.log
+  console: false               # 是否输出 stderr（--debug 会覆盖为 true）

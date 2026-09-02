@@ -265,15 +265,12 @@ def main() -> None:
         parser.error("需要 --query（用户检索意图）或至少一个 --group")
     intent = args.query or " ".join(args.groups)
 
+    from _common.logsetup import load_logging_config, setup as _setup_log
+    log_cfg = load_logging_config()
     if args.debug:
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(asctime)s %(name)s %(message)s",
-            datefmt="%H:%M:%S",
-            stream=sys.stderr,
-        )
-    from _common.logsetup import setup as _setup_log
-    print(f"[log] {_setup_log(log, stderr_debug=args.debug)}", file=sys.stderr)
+        log_cfg["level"] = "debug"
+        log_cfg["console"] = True
+    print(f"[log] {_setup_log(log, **log_cfg)}", file=sys.stderr)
 
     log.debug("=== search_repos START ===")
     log.debug("query: %s", intent)
