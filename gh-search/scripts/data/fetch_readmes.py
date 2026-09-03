@@ -222,7 +222,8 @@ def run_jsonl(args):
     print(f"断点续传: 已完成 {len(done)} 条", flush=True)
 
     targets = []
-    with gzip.open(args.input, "rt", encoding="utf-8") as f:
+    opener = gzip.open if args.input.endswith(".gz") else open
+    with opener(args.input, "rt", encoding="utf-8") as f:
         for line in f:
             d = json.loads(line)
             if d["i"] not in done:
