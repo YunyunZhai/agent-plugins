@@ -18,10 +18,10 @@ class SearchRequest(BaseModel):
     language: Optional[str] = Field(None, description="限定编程语言")
     min_stars: int = Field(200, description="最小 star 阈值")
     top_k: int = Field(50, description="返回候选数")
-    star_weight: float = Field(0.03, description="语义排序 star 先验权重")
+    star_weight: float = Field(0.0, description="语义排序 star 先验权重，默认纯语义排序")
     enrich: bool = Field(False, description="执行成熟度指标过滤")
     readme: bool = Field(False, description="执行 README 片段增强")
-    rerank: bool = Field(False, description="执行百炼 rerank 精排")
+    rerank: bool = Field(True, description="执行百炼 rerank 精排")
 
 
 class Candidate(BaseModel):

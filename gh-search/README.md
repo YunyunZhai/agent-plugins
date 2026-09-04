@@ -51,7 +51,7 @@ GitHub 智能开源项目搜索插件。根据用户的自然语言检索意图�
 ### FAQ 与已知限制
 
 - **需要联网和 GitHub 授权吗？** 基础功能需要已认证的 GitHub CLI（`gh auth login`）；语义通道还需本地向量索引。
-- **结果为什么有时不精准？** 语义通道对 `name/description/topics` 做向量匹配，描述太短或太宽的项目可能被 star 先验或关键词兜底；README 双通道只覆盖约 7%（stars≥2000）的仓库。
+- **结果为什么有时不精准？** 语义通道对 repo 元数据和 README 分别召回，再经 RRF 与 rerank 排序；描述太短、README 缺失或内容过宽的项目仍可能产生噪声。
 - **通道选择是自动的吗？** 是，技能根据意图自动决定，但你也可以明确要求"都试一下"。
 - **深度模式是什么？** 可选拉取候选项目 README 片段做语义增强，默认关闭以省 token 与网络开销，每次会话会询问是否开启。
 
@@ -223,7 +223,7 @@ curl http://localhost:8000/api/v1/health
 curl "http://localhost:8000/api/v1/billing/summary?user_id=alice&period=2026-09"
 ```
 
-搜索请求体字段：`query`（必填）、`channel`（keyword/semantic/hybrid，默认 keyword）、`language`、`min_stars`（默认 200）、`top_k`（默认 50）、`star_weight`（默认 0.03）、`enrich`、`readme`、`rerank`。
+搜索请求体字段：`query`（必填）、`channel`（keyword/semantic/hybrid，默认 keyword）、`language`、`min_stars`（默认 200）、`top_k`（默认 50）、`star_weight`（默认 0，纯语义排序）、`enrich`、`readme`、`rerank`。
 
 ## 索引维护（语义通道数据源）
 

@@ -359,6 +359,36 @@ def search_knn(
     return [{"id": r["id"], "distance": r["distance"] ** 2 / 2} for r in rows]
 
 
+def search_knn_filtered(
+    conn: sqlite3.Connection,
+    query_vec: List[float],
+    k: int = 20,
+    table: str = "repo_vectors",
+    min_stars: int = 0,
+) -> List[Dict[str, Any]]:
+    """先按 stars 构造临时向量子表，再执行 kNN，避免召回后才丢弃低星仓库。"""
+    if min_stars <= 0:
+        return search_knn(conn, query_vec, k=k, table=table)
+
+    filtered_table = "temp.gh_search_filtered_vectors"
+    conn.execute("DROP TABLE IF EXISTS temp.gh_search_filtered_vectors")
+    conn.execute(
+        f"CREATE VIRTUAL TABLE {filtered_table} USING vec0"
+        f"(id TEXT PRIMARY KEY, embedding FLOAT[{EMBED_DIM}])"
+    )
+    try:
+        conn.execute(
+            f"INSERT INTO {filtered_table}(id, embedding) "
+            f"SELECT v.id, v.embedding FROM {table} v "
+            "JOIN repos r ON r.id = v.id "
+            "WHERE r.stars >= ?",
+            (min_stars,),
+        )
+        return search_knn(conn, query_vec, k=k, table=filtered_table)
+    finally:
+        conn.execute("DROP TABLE IF EXISTS temp.gh_search_filtered_vectors")
+
+
 def count_readme_vectors(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM repo_readme_vectors").fetchone()[0]
 

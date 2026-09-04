@@ -130,13 +130,13 @@ incremental_update.py ──▶ 增量插新/变化检测重嵌
 
 | 脚本 | 角色 | 关键参数 |
 |------|------|----------|
-| `search/semantic_search.py` | 语义通道：嵌入 → kNN → README 双通道合并 → star 先验混合排序 | `--top-k`(50)、`--star-weight`(0.03)、`--backend`(local)、`--dual-query`、`--pure-semantic` |
+| `search/semantic_search.py` | 语义通道：双路 kNN（各 Top-250）→ 加权 RRF（Top-300）→ rerank | `--top-k`(50)、`--star-weight`(0，>0 时启用先验)、`--backend`(local)、`--dual-query`、`--pure-semantic` |
 | `search/hybrid_search.py` | 并行通道：关键词 + 语义 union 去重 | `--top-k`(50)、`--backend`(local) |
 
 语义查询流程（`semantic_search.py`）：
 1. 嵌入 query（`local`=bge-m3 fp32，`dashscope`=qwen3.7，`ark`=doubao，`pinecone`=llama）。
-2. 深窗口 kNN（star_weight>0 时 k=4000，vec0 全库暴力扫描零额外成本）。
-3. README 双通道合并：与 `repo_readme_vectors` 的 kNN 按 id 取最小距离（同模型同空间，表非空自动启用）。
+2. 按 min_stars 构造临时向量子表后执行 kNN，保证 repo/README 候选在同一星数条件下比较。
+3. README 双通道合并：repo/README 各取 Top-250，按 repo=1.0、README=0.8 的 RRF 融合，保留 Top-300。
 4. fork/archived 硬过滤 + `min_stars` 过滤（用本地 stars 快照）。
 5. 混合排序：`score = distance − star_weight·log10(1+stars快照)`（λ=0.03）。
 6. 截断 top_k，仅对最终 top_k 在线刷新实时 stars（失败回落快照）。

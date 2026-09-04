@@ -30,12 +30,14 @@ def _semantic_search(
     query: str, min_stars: int, top_k: int, star_weight: float,
     backend: str = "local", db_path: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """语义通道：sqlite-vec kNN。"""
+    """语义通道：双路 kNN + RRF，保留候选池供 rerank。"""
     from search.semantic_search import semantic_search as _semantic_search_fn
 
+    recall_k = max(top_k * 6, 300) if top_k > 0 else top_k
     result = _semantic_search_fn(
         query, top_k=top_k, min_stars=min_stars,
         db_path=db_path, star_weight=star_weight, backend=backend,
+        recall_k=recall_k,
     )
     return result.get("candidates_list", [])
 
@@ -99,7 +101,7 @@ def run_pipeline(
     language: Optional[str] = None,
     min_stars: int = 200,
     top_k: int = 50,
-    star_weight: float = 0.03,
+    star_weight: float = 0.0,
     do_enrich: bool = False,
     do_readme: bool = False,
     do_rerank: bool = False,

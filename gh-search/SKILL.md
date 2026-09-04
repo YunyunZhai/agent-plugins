@@ -87,7 +87,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/search/semantic_search.py \
 **说明**：
 - 语义通道对 `name/description/topics` 做向量匹配，能召回"描述不含关键词但语义相关"的项目
 - 输出 `candidates_list` 结构与关键词通道一致，便于通道3 union
-- 按混合分排序（语义距离 − 0.03·log10(1+stars快照)），兼顾语义相关性与项目成熟度；`--pure-semantic` 可回退纯距离排序
+- 默认按纯语义距离排序；传入 `--star-weight` 且大于 0 时才启用 star 先验混合排序，`--pure-semantic` 仍可显式固定纯语义排序
 
 ### Step 2 — 语义初筛（subagent 执行，保护主会话上下文）
 
@@ -230,7 +230,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/pipeline/build_index.py --backend local --
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/maintenance/incremental_update.py --mode week --since 7 --db <v3库>
 ```
 
-排序机制：`score = 语义距离 − 0.03·log10(1+stars快照)`——深窗口 k=4000 召回 +
+排序机制：默认按纯语义距离排序；`star_weight>0` 时使用 `score = 语义距离 − star_weight·log10(1+stars快照)`；设置 `min_stars` 时先按星数过滤再召回，
 star 先验救回元数据稀疏的头部项目（alist 实测从全库第 1361 名升至第 1）；
 `--pure-semantic` 回退纯距离排序。
 
@@ -253,6 +253,6 @@ ARK_API_KEY=<key> ARK_BASE_URL=<套餐端点> GH_SEARCH_EMBED_DIM=2048 \
 ```
 </details>
 
-- **README 双通道（已启用）**：`repo_readme_vectors` 已入库 30,378 条（stars≥2000 仓库全量，qwen3.7 Batch 嵌入），检索时自动按 id 取双表最小距离，无需开关
+- **README 双通道（已启用）**：`repo_readme_vectors` 已入库 30,378 条（stars≥2000 仓库全量，qwen3.7 Batch 嵌入），检索时 repo/README 各召回 Top-250，经加权 RRF 融合为 Top-300 后交给 rerank
 - **依赖**：本地后端需 `pip install sqlite-vec sentence-transformers onnxruntime`；方舟/Pinecone 各需对应 SDK 与密钥
 - 索引未构建时，SKILL 自动使用**通道1关键词**，不影响基本功能

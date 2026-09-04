@@ -5,7 +5,7 @@
 输入自然语言 query → 嵌入模型向量化 → sqlite-vec kNN 召回 → 过滤 → 输出候选。
 
 输出结构与 search_repos.py 完全一致（candidates_list 同构），便于 SKILL.md
-在三通道（关键词 / 语义 / 并行）中 union 合并。
+语义通道内部合并 repo 元数据向量与 README 向量；结果可交给后续 rerank。
 
 用法:
     python3 semantic_search.py --query "启动快的编码智能体" --json
@@ -41,11 +41,14 @@ from _common.sqlite_store import (
     count_vectors,
     get_repo,
     search_knn,
+    search_knn_filtered,
 )
 
 DEFAULT_TOP_K = 50
 DEFAULT_MIN_STARS = 0
-DEFAULT_STAR_WEIGHT = 0.03   # 混合排序: 每 10 倍 star 抵扣 0.03 个语义距离单位
+DEFAULT_STAR_WEIGHT = 0.0    # 默认纯语义距离排序；大于 0 时启用 star 先验
+DEFAULT_ROUTE_RECALL_K = 250
+DEFAULT_FUSED_RECALL_K = 300
                              # (λ 扫描实测: 0.03 使 alist/LitePan 同入全库前50;
                              #  0.08 会放行 mega-list 挤掉真相关小项目)
 
@@ -222,6 +225,40 @@ def _fuse_knn(hit_lists: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
              "_source": best_source.get(rid, "repo")} for rid, s in ordered]
 
 
+def _fuse_repo_readme(
+    repo_hits: List[Dict[str, Any]],
+    readme_hits: List[Dict[str, Any]],
+    limit: int = DEFAULT_FUSED_RECALL_K,
+) -> List[Dict[str, Any]]:
+    """按加权 RRF 融合 repo/README 两路结果，距离仅用于同分时打破平局。"""
+    weights = (("repo", repo_hits, 1.0), ("readme", readme_hits, 0.8))
+    scores: Dict[str, float] = {}
+    distances: Dict[str, float] = {}
+    sources: Dict[str, List[str]] = {}
+    ranks: Dict[str, Dict[str, int]] = {}
+    for source, hits, weight in weights:
+        for rank, hit in enumerate(hits, 1):
+            rid = hit["id"]
+            scores[rid] = scores.get(rid, 0.0) + weight / (60 + rank)
+            distances[rid] = min(distances.get(rid, float("inf")), hit["distance"])
+            sources.setdefault(rid, []).append(source)
+            ranks.setdefault(rid, {})[f"_{source}_rank"] = rank
+
+    ordered = sorted(scores, key=lambda rid: (-scores[rid], distances[rid]))
+    fused = []
+    for rid in ordered[:limit]:
+        item = {
+            "id": rid,
+            "distance": distances[rid],
+            "_rrf_score": round(scores[rid], 6),
+            "_sources": sources[rid],
+            "_source": "+".join(sources[rid]),
+        }
+        item.update(ranks[rid])
+        fused.append(item)
+    return fused
+
+
 def semantic_search(
     query: str,
     top_k: int = DEFAULT_TOP_K,
@@ -233,11 +270,13 @@ def semantic_search(
     star_weight: float = DEFAULT_STAR_WEIGHT,
     dual_query: bool = False,
     backend: str = "pinecone",
+    recall_k: Optional[int] = None,
 ) -> Dict[str, Any]:
     """主流程：嵌入 → kNN 召回 → 在线拉最新 stars → 过滤 → 排序 → 截断输出。
 
-    star_weight > 0 时按混合分排序（语义距离 − star 先验），并把 kNN 召回窗口
-    放宽到 top_k×10（让头部项目有进入候选池的机会）；= 0 时回退纯距离排序。
+    min_stars > 0 时先按 stars 构造 kNN 候选子集；star_weight > 0 时再按混合分
+    排序（语义距离 − star 先验），= 0 时按纯距离排序。recall_k 用于为后续
+    rerank 保留更大的候选池，最终返回数量仍由 top_k 控制。
     """
     log.debug("=== semantic_search START ===")
     log.debug("query: %s", query)
@@ -262,15 +301,16 @@ def semantic_search(
     if len(qvec) != EMBED_DIM:
         raise SemanticError(f"query 向量维度 {len(qvec)} != {EMBED_DIM}")
 
-    # 混合模式窗口固定拉满到 vec0 上限 4096：star 先验只能重排已召回的候选，
-    # 元数据稀疏的头部项目（alist 实测全库第 ~1400 名）必须先进池子才有的救。
-    # sqlite-vec 是全库暴力扫描，深堆与浅堆成本几乎相同。
-    knn_k = 4000 if star_weight > 0 else max(top_k * 2, 20)
-    log.debug("knn_k=%d (star_weight=%.3f, top_k=%d)", knn_k, star_weight, top_k)
+    # 有 star 过滤时先构造符合条件的临时向量子表，再执行 kNN，保证候选池公平。
+    candidate_k = max(recall_k or DEFAULT_FUSED_RECALL_K, top_k)
+    knn_k = DEFAULT_ROUTE_RECALL_K
+    log.debug("knn_k=%d per route (star_weight=%.3f, top_k=%d, fused_recall_k=%d)",
+              knn_k, star_weight, top_k, candidate_k)
 
     # 各查询路: 中文(必有) + 英文(--dual-query)
     t0 = time.monotonic()
-    hit_lists: List[List[Dict[str, Any]]] = [search_knn(conn, qvec, k=knn_k)]
+    hit_lists: List[List[Dict[str, Any]]] = [search_knn_filtered(
+        conn, qvec, k=knn_k, min_stars=min_stars)]
     log.debug("repo_vectors kNN: %d hits in %.2fs (top1: %s dist=%.4f)",
               len(hit_lists[0]), time.monotonic() - t0,
               hit_lists[0][0]["id"] if hit_lists[0] else "-",
@@ -283,10 +323,11 @@ def semantic_search(
         en_text = translate_to_english(query)
         if en_text:
             print(f"[dual] EN: {en_text}", file=sys.stderr)
-            hit_lists.append(search_knn(conn, embed_query(en_text, model, backend),
-                                        k=knn_k))
+            hit_lists.append(search_knn_filtered(
+                conn, embed_query(en_text, model, backend),
+                k=knn_k, min_stars=min_stars))
 
-    # README 双通道: 每路结果与 README 表按 id 取最小距离（同模型同空间可直接比较）
+    # README 双通道：两路各取 Top-250，再用加权 RRF 合并为候选池。
     try:
         has_readme = count_readme_vectors(conn) > 0
     except Exception:
@@ -295,30 +336,18 @@ def semantic_search(
     merged_top20 = repo_knn_top20  # fallback if no README
     if has_readme:
         t0 = time.monotonic()
-        def _with_readme(hl):
-            merged = {h["id"]: h["distance"] for h in hl}
-            source = {h["id"]: "repo" for h in hl}
-            repo_only = len(merged)
-            readme_hits = search_knn(conn, qvec, k=knn_k, table="repo_readme_vectors")
-            log.debug("  README kNN: %d hits (top1: %s dist=%.4f)",
-                      len(readme_hits),
-                      readme_hits[0]["id"] if readme_hits else "-",
-                      readme_hits[0]["distance"] if readme_hits else 0)
-            for i, h in enumerate(readme_hits[:20]):
-                log.debug("    README #%d: %s dist=%.4f", i+1, h["id"], h["distance"])
-            for h in readme_hits:
-                rid, d = h["id"], h["distance"]
-                if rid not in merged or d < merged[rid]:
-                    merged[rid] = d
-                    source[rid] = "readme"
-                elif rid not in source:
-                    source[rid] = "repo"
-            log.debug("README merge: repo_only=%d, after_merge=%d, new_from_readme=%d",
-                      repo_only, len(merged), len(merged) - repo_only)
-            return sorted(({"id": i, "distance": d, "_source": source.get(i, "repo")}
-                           for i, d in merged.items()),
-                          key=lambda x: x["distance"])
-        hit_lists = [_with_readme(hl) for hl in hit_lists]
+        readme_hits = search_knn_filtered(
+            conn, qvec, k=knn_k, table="repo_readme_vectors",
+            min_stars=min_stars)
+        log.debug("  README kNN: %d hits (top1: %s dist=%.4f)",
+                  len(readme_hits),
+                  readme_hits[0]["id"] if readme_hits else "-",
+                  readme_hits[0]["distance"] if readme_hits else 0)
+        for i, h in enumerate(readme_hits[:20]):
+            log.debug("    README #%d: %s dist=%.4f", i+1, h["id"], h["distance"])
+        hit_lists[0] = _fuse_repo_readme(hit_lists[0], readme_hits, candidate_k)
+        log.debug("README RRF merge: repo=%d readme=%d fused=%d",
+                  len(hit_lists[0]), len(readme_hits), len(hit_lists[0]))
         merged_top20 = {h["id"]: i+1 for i, h in enumerate(hit_lists[0][:20])}
         log.debug("README merge done in %.2fs", time.monotonic() - t0)
         for i, h in enumerate(hit_lists[0][:20]):
@@ -344,10 +373,10 @@ def semantic_search(
         if exclude_archived and repo.get("is_archived"):
             skipped_archived += 1
             continue
-        candidates.append((repo, h["distance"], h.get("_source", "repo")))
+        candidates.append((repo, h["distance"], h.get("_source", "repo"), h))
     log.debug("candidates: recalled=%d, filtered(fork=%d, archived=%d), kept=%d",
               recalled, skipped_fork, skipped_archived, len(candidates))
-    for i, (repo, dist, src) in enumerate(candidates[:20]):
+    for i, (repo, dist, src, _src_info) in enumerate(candidates[:20]):
         embed_text = (repo.get("embed_text") or "")[:120]
         readme_preview = (repo.get("readme_embed_text") or "")[:120]
         log.debug("  candidate #%d: %s dist=%.4f source=%s lang=%s",
@@ -363,7 +392,7 @@ def semantic_search(
     # 逐个在线拉 star 不可行（130+ GraphQL 批次）；仅最终 top_k 在线刷新展示值
     out: List[Dict[str, Any]] = []
     skipped_stars = 0
-    for repo, dist, _src in candidates:
+    for repo, dist, _src, _src_info in candidates:
         stars = int(repo.get("stars") or 0)
         if stars < min_stars:
             skipped_stars += 1
@@ -378,6 +407,7 @@ def semantic_search(
             "full_name": repo.get("id", ""),
             "description": repo.get("description"),
             "topics": topics,
+            "readme_snippet": repo.get("readme_embed_text") or None,
             "primary_language": repo.get("primary_language"),
             "stars": stars,                              # 本地快照值（打分用）
             "_stars_live": None,
@@ -385,6 +415,8 @@ def semantic_search(
             "is_archived": bool(repo.get("is_archived")),
             "_semantic_distance": round(dist, 4),
         })
+        if _src_info:
+            out[-1].update({k: v for k, v in _src_info.items() if k.startswith("_")})
 
     # 排序：混合分（语义距离 − star 先验）或纯语义距离，截断到 top_k
     if star_weight > 0:
@@ -393,6 +425,9 @@ def semantic_search(
         out.sort(key=lambda c: c["_score"])
         note = (f"混合排序：score = 语义距离 − {star_weight}·log10(1+stars快照)，"
                 "兼顾语义相关性与项目成熟度；--pure-semantic 可回退纯距离排序。")
+    elif any("_rrf_score" in c for c in out):
+        out.sort(key=lambda c: c.get("_rrf_score", 0), reverse=True)
+        note = "RRF 融合排序（repo 权重 1.0，README 权重 0.8），star 仅作过滤。"
     else:
         out.sort(key=lambda c: c.get("_semantic_distance", 1e9))
         note = "纯语义排序（距离升序），star 仅作过滤不作排序（避免 star 淹没语义差异）。"
@@ -442,7 +477,7 @@ def semantic_search(
     new_from_readme = [name for name in final_names if name not in repo_knn_top20]
     if new_from_readme:
         log.debug("  NEW from README (not in repo_kNN top20): %s", " ".join(new_from_readme))
-    out = out[:top_k]
+    out = out[:candidate_k]
 
     # 仅对最终 top_k 在线刷新实时 stars（展示精度；失败保留快照值）
     try:
@@ -467,6 +502,7 @@ def semantic_search(
         "star_weight": star_weight,
         "recalled": recalled,
         "candidates": len(out),
+        "recall_k": candidate_k,
         "candidates_list": out,
         "note": "语义召回（name/description/topics 向量匹配）。" + note,
     }
