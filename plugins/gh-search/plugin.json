@@ -1,0 +1,8 @@
+{
+  "name": "gh-search",
+  "version": "1.0.0",
+  "description": "GitHub 智能开源项目搜索：按自然语言意图召回并精排高赞开源项目（HTTP MCP）",
+  "author": { "name": "YunyunZhai" },
+  "repository": "https://github.com/YunyunZhai/agent-plugins",
+  "skills": ["./skills/gh-search"]
+}
