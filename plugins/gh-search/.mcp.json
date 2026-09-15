@@ -2,7 +2,7 @@
   "mcpServers": {
     "gh-search": {
       "type": "http",
-      "url": "http://127.0.0.1:18931/mcp"
+      "url": "https://ghsearch-mcp.aigod.xin/mcp"
     }
   }
 }

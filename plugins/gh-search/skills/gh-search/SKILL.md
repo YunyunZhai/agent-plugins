@@ -4,15 +4,6 @@ description: |
   当用户询问"找开源项目"、"推荐开源库"、"GitHub 搜索"、"找成熟活跃的 X 库"、"找高赞的 X 项目"、"哪个开源项目适合"、"找启动快的编码智能体"、"找 Python 安全扫描库"等开源项目检索与推荐问题时触发。通过 MCP 召回约 300 个候选仓库，按用户意图做精选排序输出 Top-N；后续用户反馈可在已召回的候选池内做二次排序与精选，无需重复召回。
 ---
 
-## 前置检查（HTTP MCP）
-
-本插件通过 HTTP 连接 gh-search MCP server（`http://127.0.0.1:18931/mcp`）。使用前确认：
-
-1. gh-search 后端已启动：本机已运行
-   `python -m app.mcp.mcp_server --http --port 18931`（见 user-guide「启动后端」）。
-2. 若工具 `gh_search` 未出现在工具列表，向用户提示：
-   请先启动后端并确认插件已安装、`/mcp` 中 gh-search 显示已连接。
-
 # GitHub 智能开源项目搜索
 
 根据用户的自然语言检索意图，先用 MCP 召回一批候选仓库，再按意图做**精选排序**输出 Top-N 推荐。
@@ -33,7 +24,7 @@ description: |
 
 | 用户表述特征 | 通道 | 说明 |
 |-------------|------|------|
-| 含明确技术名词、仓库名、语言、框架 | `keyword` | GitHub GraphQL 实时搜索 |
+| 含明确技术名词、仓库名、语言、框架 | `keyword` | GitHub GraphQL 实时搜索 + DB 补字段 |
 | 模糊功能描述、"想找能…的"、"有没有…的项目" | `semantic` | 本地语义索引（qwen 嵌入） |
 | 两者兼有，或想互补覆盖 | keyword + semantic 双通道 | 自行合并去重 |
 
@@ -63,10 +54,10 @@ description: |
 ### 调用方式
 
 ```
-MCP tool: gh_search(query, channel, top_k=300, language)
+MCP tool: gh_search(query, channel, top_k=200, language)
 ```
 
-- `top_k` 固定 300，确保候选池够大
+- `top_k` 固定 200，确保候选池够大（keyword 候选池上限 200）
 - 需要时两者都调（keyword + semantic），自行合并去重
 - 合并去重和排序按用户意图灵活处理，不写死规则
 
@@ -81,7 +72,7 @@ MCP tool: gh_search(query, channel, top_k=300, language)
 
 ## 四、粗筛 Top-100
 
-从 MCP 召回的约 300 个候选中快速筛选最相关的 100 个：
+从 MCP 召回的约 200 个候选中快速筛选最相关的 100 个：
 
 - 按用户意图相关性快速判断，不求精确，但求不遗漏
 - `description` 为空**不能作为淘汰理由**（很多正经项目不填描述）
@@ -103,8 +94,7 @@ MCP tool: gh_search(query, channel, top_k=300, language)
 
 ### 注意
 
-- semantic 通道返回的候选**没有 `stars` 字段**，不因此降级，用其他维度补足
-- 每条推荐给出：仓库名（`owner/repo`）、star、一句话能力说明、匹配理由
+- 每条推荐给出：仓库名（`owner/repo`）、star（有则给，DB 缺失的标注）、一句话能力说明、匹配理由
 - 默认 Top-10，用户要求"多推荐几个"时扩展到 Top-20
 - 池内确实不够时如实说明，不凑数
 
@@ -128,12 +118,3 @@ MCP tool: gh_search(query, channel, top_k=300, language)
 | 追问："第二个项目详细说说" | 直接展开详情 |
 | 池内无匹配 | 明确告知，建议放宽条件或重新召回 |
 | 全新主题（如从"安全扫描"切换到"网盘聚合"） | 重新走首轮流程（意图识别 → MCP 召回 → …） |
-
-## 关键约束
-
-1. **候选池是后续轮次的唯一数据源**——后续轮次不重新调 MCP，除非用户切换全新主题。
-2. **不写文件**——候选池保留在对话上下文中，不写 `ghsearch_pool.json`。
-3. **不调用外部脚本**——`enrich_metrics`、`rerank_results`、`llm_rank_results` 均不再使用，精排由大模型直接完成。
-4. **`description` 为空不丢弃**——很多正经项目不填描述。
-5. **规则从"死"变"活"**——不写死合并去重算法、排序公式，让大模型按意图灵活判断。
-6. **semantic 通道无 stars**——不因此降级，用描述匹配度、readme 片段等其他维度补足。
